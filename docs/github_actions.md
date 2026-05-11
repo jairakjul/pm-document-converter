@@ -25,6 +25,8 @@ Runs on Ubuntu:
 - Runs `scripts/export_and_validate_sample.py`.
 - Uploads generated report output as `report-output-linux`.
 
+Sample export validation runs only when a ZIP file exists under `samples/`.
+
 ### `build-windows`
 
 Runs on Windows:
@@ -50,3 +52,5 @@ PyInstaller cannot cross-compile. The Windows app must be built on Windows, and 
 The macOS artifact is zipped because `.app` bundles are directories and should be downloaded as a single archive.
 
 PDF export still depends on LibreOffice or Microsoft Word availability on the runner. The validation expects DOCX generation and does not require PDF output.
+
+The real sample ZIP is intentionally ignored by Git. Add a sanitized sample ZIP under `samples/` if you want GitHub Actions to run the full export validation on every push.

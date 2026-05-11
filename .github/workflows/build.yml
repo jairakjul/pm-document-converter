@@ -1,0 +1,124 @@
+name: Build and Validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate-report:
+    name: Validate Report Export
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: python -m py_compile src/*.py scripts/*.py
+
+      - name: Export and validate sample report
+        run: python scripts/export_and_validate_sample.py
+
+      - name: Upload report output
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-output-linux
+          path: output/
+
+  build-windows:
+    name: Build Windows App
+    runs-on: windows-latest
+    needs: validate-report
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate report export on Windows
+        run: python scripts/export_and_validate_sample.py
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build_desktop.ps1 -Clean
+
+      - name: Verify Windows GUI executable
+        run: |
+          python -c "from pathlib import Path; import struct; p=Path(r'dist/PMDocumentConverter/PMDocumentConverter.exe'); data=p.read_bytes(); pe=struct.unpack_from('<I', data, 0x3c)[0]; subsystem=struct.unpack_from('<H', data, pe+24+68)[0]; print('subsystem', subsystem); raise SystemExit(0 if subsystem == 2 else 1)"
+
+      - name: Upload Windows app
+        uses: actions/upload-artifact@v4
+        with:
+          name: PMDocumentConverter-windows
+          path: dist/PMDocumentConverter/
+
+      - name: Upload Windows report output
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-output-windows
+          path: output/
+
+  build-macos:
+    name: Build macOS App
+    runs-on: macos-latest
+    needs: validate-report
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt
+
+      - name: Validate report export on macOS
+        run: .venv/bin/python scripts/export_and_validate_sample.py
+
+      - name: Build macOS app bundle
+        run: bash scripts/build_desktop_macos.sh
+
+      - name: Package app bundle for download
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent PMDocumentConverter.app PMDocumentConverter-macos.zip
+
+      - name: Upload macOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: PMDocumentConverter-macos
+          path: dist/PMDocumentConverter-macos.zip
+
+      - name: Upload macOS report output
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-output-macos
+          path: output/

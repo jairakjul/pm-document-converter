@@ -1,0 +1,94 @@
+version: 2.1
+
+orbs:
+  win: circleci/windows@5.0
+
+jobs:
+  validate-report:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - pip-v1-{{ checksum "requirements.txt" }}
+            - pip-v1-
+      - run:
+          name: Install dependencies
+          command: |
+            python -m venv .venv
+            . .venv/bin/activate
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+      - save_cache:
+          key: pip-v1-{{ checksum "requirements.txt" }}
+          paths:
+            - ~/.cache/pip
+      - run:
+          name: Compile Python files
+          command: |
+            . .venv/bin/activate
+            python -m py_compile src/*.py scripts/*.py
+      - run:
+          name: Export and validate sample report
+          command: |
+            . .venv/bin/activate
+            python scripts/export_and_validate_sample.py
+      - store_artifacts:
+          path: output
+          destination: report-output
+
+  build-windows-exe:
+    executor:
+      name: win/server-2022
+      size: medium
+    steps:
+      - checkout
+      - run:
+          name: Ensure Python is available
+          command: |
+            if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+              choco install python --version=3.12.8 -y
+              refreshenv
+            }
+            python --version
+      - restore_cache:
+          keys:
+            - pip-win-v1-{{ checksum "requirements.txt" }}
+            - pip-win-v1-
+      - run:
+          name: Install dependencies
+          command: |
+            python -m venv .venv
+            .\.venv\Scripts\python.exe -m pip install --upgrade pip
+            .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+      - save_cache:
+          key: pip-win-v1-{{ checksum "requirements.txt" }}
+          paths:
+            - C:\Users\circleci\AppData\Local\pip\Cache
+      - run:
+          name: Export and validate sample report on Windows
+          command: |
+            .\.venv\Scripts\python.exe scripts\export_and_validate_sample.py
+      - run:
+          name: Build Windows desktop app
+          command: |
+            powershell -ExecutionPolicy Bypass -File .\scripts\build_desktop.ps1 -Clean
+      - run:
+          name: Verify executable is a Windows GUI app
+          command: |
+            .\.venv\Scripts\python.exe -c "from pathlib import Path; import struct; p=Path(r'dist\PMDocumentConverter\PMDocumentConverter.exe'); data=p.read_bytes(); pe=struct.unpack_from('<I', data, 0x3c)[0]; subsystem=struct.unpack_from('<H', data, pe+24+68)[0]; print('subsystem', subsystem); raise SystemExit(0 if subsystem == 2 else 1)"
+      - store_artifacts:
+          path: dist/PMDocumentConverter
+          destination: packaged-app
+      - store_artifacts:
+          path: output
+          destination: windows-report-output
+
+workflows:
+  validate-and-package:
+    jobs:
+      - validate-report
+      - build-windows-exe:
+          requires:
+            - validate-report

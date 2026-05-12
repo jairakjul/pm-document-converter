@@ -41,6 +41,11 @@ try {
     $UnusedPaths = @(
         (Join-Path $InternalDir "Pythonwin"),
         (Join-Path $InternalDir "PIL\_avif.cp312-win_amd64.pyd"),
+        (Join-Path $InternalDir "PIL\_webp.cp312-win_amd64.pyd"),
+        (Join-Path $InternalDir "lxml\html"),
+        (Join-Path $InternalDir "lxml\isoschematron"),
+        (Join-Path $InternalDir "lxml\objectify.cp312-win_amd64.pyd"),
+        (Join-Path $InternalDir "matplotlib\mpl-data\sample_data"),
         (Join-Path $InternalDir "numpy-2.4.4.dist-info")
     )
 

@@ -236,6 +236,12 @@ def parse_mfec_pm(auto_collection_dir: Path) -> dict:
 
     sec51 = sections.get("5_1", "")
     result["perf_stats"] = {}
+    result["perf_review"] = {
+        "library_cache_namespace": [],
+        "pin_reload": {},
+        "shared_pool_stats": {},
+        "undo_segments": [],
+    }
 
     # Split section 5_1 by ^o^...^o^ markers into named sub-sections
     perf_subsections = {}
@@ -279,19 +285,60 @@ def parse_mfec_pm(auto_collection_dir: Path) -> dict:
         if "librarycache hitratio" in sub_name.lower():
             rows = parse_sqlplus_table(body)
             if rows:
+                namespace_rows = []
                 total = 0.0
                 count = 0
                 for r in rows:
+                    namespace = r.get("NAMESPACE", "").strip()
                     val = r.get("GETHITRATIO", "").strip()
+                    if namespace:
+                        namespace_rows.append({"namespace": namespace, "gethitratio": val})
                     try:
                         total += float(val)
                         count += 1
                     except ValueError:
                         pass
+                result["perf_review"]["library_cache_namespace"] = namespace_rows
                 if count > 0:
                     avg = total / count
                     result["perf_stats"]["LIBRARY_CACHE_HITRATIO"] = str(round(avg, 6))
             break
+
+    for sub_name, body in perf_subsections.items():
+        lower_name = sub_name.lower()
+        rows = parse_sqlplus_table(body)
+
+        if "pin/reload ratio" in lower_name and rows:
+            row = rows[0]
+            result["perf_review"]["pin_reload"] = {
+                "executions": row.get("Executions", row.get("EXECUTIONS", "")),
+                "cache_misses": row.get("Cache Misses", row.get("CACHE MISSES", "")),
+                "ratio": row.get("SUM(RELOADS)/SUM(PINS)", row.get("SUM(RELOADS)/SUM(PINS)+SUM(RELOADS)", "")),
+            }
+        elif "shared pool statistics" in lower_name and rows:
+            row = rows[0]
+            result["perf_review"]["shared_pool_stats"] = {
+                "free_space": row.get("FREE_SPACE", ""),
+                "avg_free_size": row.get("AVG_FREE_SIZE", ""),
+                "max_free_size": row.get("MAX_FREE_SIZE", ""),
+                "used_space": row.get("USED_SPACE", ""),
+                "avg_used_size": row.get("AVG_USED_SIZE", ""),
+            }
+        elif "no. and size of undo segments" in lower_name and rows:
+            undo_rows = []
+            for row in rows:
+                amount = row.get("COUNT(*)", "").strip()
+                segment_type = row.get("SEGMENT_TYPE", "").strip()
+                size_mb = row.get("MB", "").strip()
+                if amount or segment_type or size_mb:
+                    undo_rows.append(
+                        {
+                            "amount": amount,
+                            "segment_type": segment_type,
+                            "size_mb": size_mb,
+                        }
+                    )
+            result["perf_review"]["undo_segments"] = undo_rows
 
     sec61 = sections.get("6_1", "")
     ts_free_rows = parse_sqlplus_table(sec61)
@@ -592,13 +639,30 @@ def _parse_statspack_sga_advisory(text: str) -> list[dict]:
 
 
 def parse_patch_info(log_dir: Path) -> list[dict]:
-    path = log_dir / "db_lsinventory.txt"
-    if not path.exists():
+    candidates = [
+        log_dir / "db_lsinventory.txt",
+        log_dir / "DB_OPatch.txt",
+        log_dir / "DB_Opatch.txt",
+    ]
+    path = next((p for p in candidates if p.exists()), None)
+    if not path:
         return []
 
     text = path.read_text(encoding="utf-8", errors="replace")
-    ver_m = re.search(r"Version\s*:\s*([\d.]+)", text, re.IGNORECASE)
-    current_ver = ver_m.group(1).strip() if ver_m else "Unknown"
+    current_ver = "Unknown"
+
+    ru_match = re.search(r"Database Release Update\s*:\s*([\d.]+)", text, re.IGNORECASE)
+    if ru_match:
+        current_ver = ru_match.group(1).strip()
+    else:
+        product_match = re.search(r"Oracle Database .*?\s(\d+\.\d+\.\d+\.\d+\.\d+)", text, re.IGNORECASE)
+        if product_match:
+            current_ver = product_match.group(1).strip()
+        else:
+            opatch_match = re.search(r"OPatch version\s*:\s*([\d.]+)", text, re.IGNORECASE)
+            if opatch_match:
+                current_ver = opatch_match.group(1).strip()
+
     return [
         {
             "component": "Oracle Home",
@@ -620,6 +684,16 @@ def find_os_dir(extracted_root: Path, fa_root: Path) -> Optional[Path]:
     """Find the os/oracle/ directory in the extracted ZIP.
     The os/ folder is typically a sibling or cousin of the fast_assessment root,
     NOT inside it. We search by walking up from fa_root."""
+    direct_oracle = fa_root / "os" / "oracle"
+    if direct_oracle.is_dir():
+        return direct_oracle
+    direct_root = fa_root / "os" / "root"
+    if direct_root.is_dir():
+        return direct_root
+    direct_os = fa_root / "os"
+    if direct_os.is_dir():
+        return direct_os
+
     # Strategy 1: Check sibling/parent directories walking up from fa_root
     current = fa_root
     for _ in range(5):
@@ -1588,6 +1662,81 @@ def find_fast_assessment_root(extracted_root: Path) -> Path:
     return candidates[0]
 
 
+def find_fast_assessment_root_or_nested_zip(extracted_root: Path) -> tuple[Path, Optional[Path]]:
+    try:
+        return find_fast_assessment_root(extracted_root), None
+    except FileNotFoundError:
+        pass
+
+    nested_zips = sorted(p for p in extracted_root.rglob("*.zip") if p.is_file())
+    nested_candidates = []
+    for nested_zip in nested_zips:
+        nested_extract_dir = extracted_root / f"__nested_{nested_zip.stem}"
+        nested_extract_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(nested_zip, "r") as zf:
+                zf.extractall(nested_extract_dir)
+            fa_root = find_fast_assessment_root(nested_extract_dir)
+        except (zipfile.BadZipFile, FileNotFoundError):
+            continue
+
+        auto_collection = fa_root / "auto_collection"
+        score = 0
+        for required_file in ("mfec_pm.txt", "registry.log", "invalid_obj.log", "mfec_oracle_stats.log"):
+            if (auto_collection / required_file).is_file():
+                score += 10
+        if list((fa_root / "report").glob("*_top*.lst")):
+            score += 5
+        nested_candidates.append((score, nested_zip.name, fa_root, nested_zip))
+
+    if nested_candidates:
+        nested_candidates.sort(key=lambda item: (-item[0], item[1]))
+        _, _, fa_root, nested_zip = nested_candidates[0]
+        return fa_root, nested_zip
+
+    raise FileNotFoundError(
+        "Cannot find fast_assessment folder inside ZIP. Expected folder containing "
+        "auto_collection/ and log/, or a ZIP bundle containing a Fast Assessment ZIP."
+    )
+
+
+def discover_fast_assessment_sources(extracted_root: Path) -> list[dict]:
+    sources = []
+    try:
+        fa_root = find_fast_assessment_root(extracted_root)
+        sources.append({"root": fa_root, "source_zip": None, "score": 100})
+        return sources
+    except FileNotFoundError:
+        pass
+
+    for nested_zip in sorted(p for p in extracted_root.rglob("*.zip") if p.is_file()):
+        nested_extract_dir = extracted_root / f"__nested_{nested_zip.stem}"
+        nested_extract_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(nested_zip, "r") as zf:
+                zf.extractall(nested_extract_dir)
+            fa_root = find_fast_assessment_root(nested_extract_dir)
+        except (zipfile.BadZipFile, FileNotFoundError):
+            continue
+
+        auto_collection = fa_root / "auto_collection"
+        score = 0
+        for required_file in ("mfec_pm.txt", "registry.log", "invalid_obj.log", "mfec_oracle_stats.log"):
+            if (auto_collection / required_file).is_file():
+                score += 10
+        if list((fa_root / "report").glob("*_top*.lst")):
+            score += 5
+        sources.append({"root": fa_root, "source_zip": nested_zip, "score": score})
+
+    if not sources:
+        raise FileNotFoundError(
+            "Cannot find fast_assessment folder inside ZIP. Expected folder containing "
+            "auto_collection/ and log/, or a ZIP bundle containing a Fast Assessment ZIP."
+        )
+    sources.sort(key=lambda item: (-item["score"], (item["source_zip"].name if item["source_zip"] else "")))
+    return sources
+
+
 def json_default(obj):
     if isinstance(obj, datetime):
         return obj.isoformat()
@@ -1753,18 +1902,34 @@ def create_docx_report(data: dict, output_docx: Path, source_zip: Path):
 def convert_docx_to_pdf(docx_path: Path, pdf_path: Path) -> bool:
     # Method 1: Microsoft Word COM automation on Windows
     if os.name == "nt":
+        word = None
+        doc = None
         try:
             import win32com.client  # type: ignore
 
             word = win32com.client.Dispatch("Word.Application")
             word.Visible = False
-            doc = word.Documents.Open(str(docx_path))
+            doc = word.Documents.Open(str(docx_path), ReadOnly=False)
+            doc.Repaginate()
+            doc.Fields.Update()
+            for toc in doc.TablesOfContents:
+                toc.Update()
+            doc.Save()
             doc.SaveAs(str(pdf_path), FileFormat=17)
-            doc.Close()
-            word.Quit()
             return pdf_path.exists()
         except Exception:
             pass
+        finally:
+            if doc is not None:
+                try:
+                    doc.Close(False)
+                except Exception:
+                    pass
+            if word is not None:
+                try:
+                    word.Quit()
+                except Exception:
+                    pass
 
     # Method 2: LibreOffice if installed
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
@@ -1786,25 +1951,52 @@ def convert_docx_to_pdf(docx_path: Path, pdf_path: Path) -> bool:
     return False
 
 
-def process_zip_to_reports(zip_path: Path, output_dir: Path, metadata: dict = None) -> tuple[Path, Optional[Path], Path]:
+def process_zip_to_reports(zip_path: Path, output_dir: Path, metadata: dict = None, create_pdf: bool = True) -> tuple[Path, Optional[Path], Path]:
     if not zip_path.exists():
         raise FileNotFoundError(f"ZIP file not found: {zip_path}")
     if zip_path.suffix.lower() != ".zip":
         raise ValueError("Input file must be .zip")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    base_name = zip_path.stem
-    docx_path = output_dir / f"{base_name}_PM_Report.docx"
-    pdf_path = output_dir / f"{base_name}_PM_Report.pdf"
-    json_path = output_dir / f"{base_name}_parsed_data.json"
 
     with tempfile.TemporaryDirectory(prefix="fa_zip_") as tmp:
         tmp_root = Path(tmp)
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(tmp_root)
-        fa_root = find_fast_assessment_root(tmp_root)
+        sources = discover_fast_assessment_sources(tmp_root)
+        primary_source = sources[0]
+        fa_root = primary_source["root"]
+        nested_zip = primary_source["source_zip"]
+        source_zip = nested_zip or zip_path
+        base_name = source_zip.stem
+        docx_path = output_dir / f"{base_name}_PM_Report.docx"
+        pdf_path = output_dir / f"{base_name}_PM_Report.pdf"
+        json_path = output_dir / f"{base_name}_parsed_data.json"
         os_dir = find_os_dir(tmp_root, fa_root)
         data = build_all_data(str(fa_root), os_dir=os_dir)
+
+        bundle_nodes = []
+        for source in sources:
+            source_root = source["root"]
+            node_os_dir = find_os_dir(tmp_root, source_root)
+            node_os_info = parse_os_info(node_os_dir)
+            source_name = source["source_zip"].name if source["source_zip"] else zip_path.name
+            bundle_nodes.append(
+                {
+                    "source": source_name,
+                    "has_database_results": (source_root / "auto_collection" / "mfec_pm.txt").is_file(),
+                    "has_registry": (source_root / "auto_collection" / "registry.log").is_file(),
+                    "os_info": node_os_info,
+                    "patch_info": parse_patch_info(source_root / "log"),
+                }
+            )
+        data["bundle_sources"] = [node["source"] for node in bundle_nodes]
+        data["bundle_nodes"] = bundle_nodes
+        if not data.get("patch_info"):
+            for node in bundle_nodes:
+                if node.get("patch_info"):
+                    data["patch_info"] = node["patch_info"]
+                    break
         
         if metadata:
             data["gui_metadata"] = metadata
@@ -1817,10 +2009,10 @@ def process_zip_to_reports(zip_path: Path, output_dir: Path, metadata: dict = No
         create_docx_report(
             data=data,
             output_docx=docx_path,
-            source_zip=zip_path,
+            source_zip=source_zip,
             output_dir=output_dir
         )
-        pdf_ok = convert_docx_to_pdf(docx_path, pdf_path)
+        pdf_ok = convert_docx_to_pdf(docx_path, pdf_path) if create_pdf else False
 
     return docx_path, pdf_path if pdf_ok else None, json_path
 

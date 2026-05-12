@@ -10,6 +10,9 @@ src_dir = project_root / "src"
 
 datas = []
 datas += collect_data_files("customtkinter")
+translations_dir = project_root / "translations"
+if translations_dir.exists():
+    datas += [(str(translations_dir), "translations")]
 
 hiddenimports = []
 hiddenimports += collect_submodules("customtkinter")
@@ -30,11 +33,15 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         "IPython",
+        "PIL.ImageQt",
         "PyQt5",
         "PyQt6",
         "PySide2",
         "PySide6",
         "Pythonwin",
+        "lxml.html",
+        "lxml.isoschematron",
+        "lxml.objectify",
         "matplotlib.backends.backend_gtk3",
         "matplotlib.backends.backend_gtk3agg",
         "matplotlib.backends.backend_gtk4",
@@ -49,6 +56,11 @@ a = Analysis(
         "matplotlib.backends.backend_wxagg",
         "matplotlib.tests",
         "notebook",
+        "numpy.f2py",
+        "numpy.fft",
+        "numpy.random",
+        "numpy.testing",
+        "numpy.tests",
         "pandas",
         "pytest",
         "scipy",

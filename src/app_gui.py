@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import tkinter as tk
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -29,21 +30,27 @@ class PMDocumentConverterApp(ctk.CTk):
         self.export_thread: threading.Thread | None = None
 
         self.zip_path_var = ctk.StringVar()
-        self.output_dir_var = ctk.StringVar(value=str(Path.cwd() / "output"))
-        self.project_name_var = ctk.StringVar(value="MA Oracle 5 Years")
+        self.output_dir_var = ctk.StringVar()
+        self.project_name_var = ctk.StringVar()
         self.project_no_var = ctk.StringVar()
         self.db_name_var = ctk.StringVar()
         self.customer_full_var = ctk.StringVar()
         self.customer_abbrev_var = ctk.StringVar()
-        self.quarter_var = ctk.StringVar(value="Q2 2025")
-        self.sale_var = ctk.StringVar()
+        self.quarter_var = ctk.StringVar()
         self.report_type_var = ctk.StringVar(value="Preventive Maintenance")
-        self.customer_name_var = ctk.StringVar()
-        self.customer_phone_var = ctk.StringVar()
-        self.customer_email_var = ctk.StringVar()
-        self.engineer_name_var = ctk.StringVar()
-        self.engineer_phone_var = ctk.StringVar()
-        self.engineer_email_var = ctk.StringVar()
+        self.language_var = ctk.StringVar(value="English")
+        self.report_date_var = ctk.StringVar()
+        self.person_type_var = ctk.StringVar(value="Customer(s)")
+        self.person_name_var = ctk.StringVar()
+        self.person_phone_var = ctk.StringVar()
+        self.person_email_var = ctk.StringVar()
+        self.create_pdf_var = ctk.BooleanVar(value=False)
+        self.people: dict[str, list[dict[str, str]]] = {
+            "customers": [],
+            "sales": [],
+            "engineers": [],
+        }
+        self.people_listboxes: dict[str, tk.Listbox] = {}
 
         self._build_layout()
         self.after(150, self._poll_events)
@@ -134,7 +141,7 @@ class PMDocumentConverterApp(ctk.CTk):
         self._entry(card, "Customer full name", self.customer_full_var, 3)
         self._entry(card, "Customer abbreviation", self.customer_abbrev_var, 4)
         self._entry(card, "Quarter", self.quarter_var, 5)
-        self._entry(card, "Sales name", self.sale_var, 6)
+        self._entry(card, "Report date", self.report_date_var, 6)
 
         ctk.CTkLabel(card, text="Report type", anchor="w", text_color="#344054").grid(
             row=15, column=0, sticky="ew", padx=18, pady=(8, 2)
@@ -144,6 +151,15 @@ class PMDocumentConverterApp(ctk.CTk):
             values=["Preventive Maintenance", "Installation"],
             variable=self.report_type_var,
         ).grid(row=16, column=0, sticky="ew", padx=18, pady=(0, 12))
+
+        ctk.CTkLabel(card, text="Report language", anchor="w", text_color="#344054").grid(
+            row=17, column=0, sticky="ew", padx=18, pady=(8, 2)
+        )
+        ctk.CTkOptionMenu(
+            card,
+            values=["English", "Thai"],
+            variable=self.language_var,
+        ).grid(row=18, column=0, sticky="ew", padx=18, pady=(0, 12))
 
     def _build_input_card(self, parent: ctk.CTkFrame) -> None:
         card = self._card(parent, "Input and Output")
@@ -161,24 +177,99 @@ class PMDocumentConverterApp(ctk.CTk):
         ).grid(row=5, column=0, sticky="ew", padx=18, pady=(12, 18))
 
     def _build_contacts_card(self, parent: ctk.CTkFrame) -> None:
-        card = self._card(parent, "Contacts")
-        card.grid(row=1, column=0, sticky="nsew", padx=(0, 10), pady=10)
+        card = self._card(parent, "Personal Information")
+        card.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=0, pady=10)
+        card.grid_columnconfigure(0, weight=1)
 
-        self._entry(card, "Customer contact", self.customer_name_var, 0)
-        self._entry(card, "Customer phone", self.customer_phone_var, 1)
-        self._entry(card, "Customer email", self.customer_email_var, 2)
-        self._entry(card, "MFEC engineer", self.engineer_name_var, 3)
-        self._entry(card, "Engineer phone", self.engineer_phone_var, 4)
-        self._entry(card, "Engineer email", self.engineer_email_var, 5)
+        content = ctk.CTkFrame(card, fg_color="transparent")
+        content.grid(row=1, column=0, sticky="nsew", padx=18, pady=(4, 18))
+        content.grid_columnconfigure(0, weight=3)
+        content.grid_columnconfigure(2, weight=2)
+
+        left = ctk.CTkFrame(content, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew")
+        left.grid_columnconfigure(1, weight=1)
+
+        for row, (label, key, height) in enumerate(
+            (("Customer(s)", "customers", 5), ("Sale", "sales", 2), ("Engineer(s)", "engineers", 5))
+        ):
+            ctk.CTkLabel(left, text=label, anchor="w", text_color="#344054").grid(
+                row=row * 2, column=0, sticky="nw", padx=(0, 8), pady=(2, 4)
+            )
+            listbox = tk.Listbox(
+                left,
+                height=height,
+                exportselection=False,
+                activestyle="none",
+                font=("Tahoma", 9),
+            )
+            listbox.grid(row=row * 2, column=1, sticky="ew", pady=(0, 8))
+            listbox.bind("<<ListboxSelect>>", lambda _event, item_key=key: self._load_selected_person(item_key))
+            self.people_listboxes[key] = listbox
+
+            ctk.CTkButton(
+                left,
+                text="Select",
+                width=58,
+                command=lambda item_label=label: self._select_person_type(item_label),
+            ).grid(row=row * 2, column=2, sticky="n", padx=(8, 0), pady=(0, 8))
+
+        separator = ctk.CTkFrame(content, width=1, fg_color="#98A2B3")
+        separator.grid(row=0, column=1, sticky="ns", padx=18)
+
+        editor = ctk.CTkFrame(content, fg_color="transparent")
+        editor.grid(row=0, column=2, sticky="nsew")
+        editor.grid_columnconfigure(1, weight=1)
+
+        fields = (
+            ("Select on", self.person_type_var, True),
+            ("Name", self.person_name_var, False),
+            ("Phone", self.person_phone_var, False),
+            ("Email Address", self.person_email_var, False),
+        )
+        for row, (label, variable, readonly) in enumerate(fields):
+            ctk.CTkLabel(editor, text=label, anchor="w", text_color="#344054").grid(
+                row=row, column=0, sticky="ew", padx=(0, 10), pady=(0, 10)
+            )
+            entry = ctk.CTkEntry(editor, textvariable=variable, height=30)
+            entry.grid(row=row, column=1, sticky="ew", pady=(0, 10))
+            if readonly:
+                entry.configure(state="disabled")
+
+        buttons = ctk.CTkFrame(editor, fg_color="transparent")
+        buttons.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        buttons.grid_columnconfigure((0, 1, 2), weight=1, uniform="person_buttons")
+        for index, (text, command) in enumerate(
+            (
+                ("Add", self._add_person),
+                ("Edit", self._edit_person),
+                ("Delete", self._delete_person),
+                ("Clear", self._clear_person_inputs),
+                ("Load", self._load_active_selected_person),
+            )
+        ):
+            ctk.CTkButton(buttons, text=text, height=32, command=command).grid(
+                row=index // 3,
+                column=index % 3,
+                sticky="ew",
+                padx=(0, 8),
+                pady=(0, 8),
+            )
 
     def _build_export_card(self, parent: ctk.CTkFrame) -> None:
         card = self._card(parent, "Export Status")
-        card.grid(row=1, column=1, sticky="nsew", padx=(10, 0), pady=10)
+        card.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=0, pady=10)
         card.grid_rowconfigure(1, weight=1)
 
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.grid(row=1, column=0, sticky="ew", padx=18, pady=(4, 10))
         actions.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkCheckBox(
+            actions,
+            text="Create PDF",
+            variable=self.create_pdf_var,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 12))
 
         self.export_button = ctk.CTkButton(
             actions,
@@ -189,7 +280,7 @@ class PMDocumentConverterApp(ctk.CTk):
         self.export_button.grid(row=0, column=1, sticky="e")
 
         self.progress_bar = ctk.CTkProgressBar(actions)
-        self.progress_bar.grid(row=0, column=0, sticky="ew", padx=(0, 16))
+        self.progress_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         self.progress_bar.set(0)
 
         self.log_box = ctk.CTkTextbox(card, height=260, wrap="word")
@@ -248,26 +339,108 @@ class PMDocumentConverterApp(ctk.CTk):
         if selected:
             self.output_dir_var.set(selected)
 
-    def _metadata(self) -> ReportMetadata:
-        customers = []
-        if any(v.get().strip() for v in (self.customer_name_var, self.customer_phone_var, self.customer_email_var)):
-            customers.append(
-                {
-                    "name": self.customer_name_var.get().strip(),
-                    "phone": self.customer_phone_var.get().strip(),
-                    "email": self.customer_email_var.get().strip(),
-                }
-            )
+    def _person_key(self) -> str:
+        mapping = {
+            "Customer(s)": "customers",
+            "Sale": "sales",
+            "Engineer(s)": "engineers",
+        }
+        return mapping.get(self.person_type_var.get(), "customers")
 
-        engineers = []
-        if any(v.get().strip() for v in (self.engineer_name_var, self.engineer_phone_var, self.engineer_email_var)):
-            engineers.append(
-                {
-                    "name": self.engineer_name_var.get().strip(),
-                    "phone": self.engineer_phone_var.get().strip(),
-                    "email": self.engineer_email_var.get().strip(),
-                }
-            )
+    def _person_label(self, key: str) -> str:
+        return {
+            "customers": "Customer(s)",
+            "sales": "Sale",
+            "engineers": "Engineer(s)",
+        }.get(key, "Customer(s)")
+
+    def _select_person_type(self, label: str) -> None:
+        self.person_type_var.set(label)
+        for listbox in self.people_listboxes.values():
+            listbox.selection_clear(0, "end")
+
+    def _person_from_inputs(self) -> dict[str, str]:
+        return {
+            "name": self.person_name_var.get().strip(),
+            "phone": self.person_phone_var.get().strip(),
+            "email": self.person_email_var.get().strip(),
+        }
+
+    def _format_person(self, person: dict[str, str]) -> str:
+        return person.get("name") or person.get("email") or person.get("phone") or "(blank)"
+
+    def _refresh_people_list(self, key: str) -> None:
+        listbox = self.people_listboxes.get(key)
+        if not listbox:
+            return
+        listbox.delete(0, "end")
+        for person in self.people[key]:
+            listbox.insert("end", self._format_person(person))
+
+    def _selected_person_index(self, key: str) -> int | None:
+        listbox = self.people_listboxes.get(key)
+        if not listbox:
+            return None
+        selection = listbox.curselection()
+        return int(selection[0]) if selection else None
+
+    def _load_selected_person(self, key: str) -> None:
+        self.person_type_var.set(self._person_label(key))
+        index = self._selected_person_index(key)
+        if index is None or index >= len(self.people[key]):
+            return
+        person = self.people[key][index]
+        self.person_name_var.set(person.get("name", ""))
+        self.person_phone_var.set(person.get("phone", ""))
+        self.person_email_var.set(person.get("email", ""))
+
+    def _load_active_selected_person(self) -> None:
+        self._load_selected_person(self._person_key())
+
+    def _add_person(self) -> None:
+        person = self._person_from_inputs()
+        if not any(person.values()):
+            return
+        key = self._person_key()
+        self.people[key].append(person)
+        self._refresh_people_list(key)
+        self._clear_person_inputs()
+
+    def _edit_person(self) -> None:
+        key = self._person_key()
+        index = self._selected_person_index(key)
+        person = self._person_from_inputs()
+        if index is None or index >= len(self.people[key]):
+            if any(person.values()):
+                self._add_person()
+            return
+        if not any(person.values()):
+            return
+        self.people[key][index] = person
+        self._refresh_people_list(key)
+        self.people_listboxes[key].selection_set(index)
+
+    def _delete_person(self) -> None:
+        key = self._person_key()
+        index = self._selected_person_index(key)
+        if index is None or index >= len(self.people[key]):
+            return
+        del self.people[key][index]
+        self._refresh_people_list(key)
+        self._clear_person_inputs()
+
+    def _clear_person_inputs(self) -> None:
+        self.person_name_var.set("")
+        self.person_phone_var.set("")
+        self.person_email_var.set("")
+
+    def _metadata(self) -> ReportMetadata:
+        customers = list(self.people["customers"])
+        sales = list(self.people["sales"])
+        engineers = list(self.people["engineers"])
+        sale_names = [person.get("name", "") for person in sales if person.get("name", "")]
+        sale = "; ".join(sale_names)
+        first_engineer = engineers[0]["name"] if engineers and engineers[0].get("name") else ""
 
         return ReportMetadata(
             project_name=self.project_name_var.get().strip(),
@@ -276,14 +449,17 @@ class PMDocumentConverterApp(ctk.CTk):
             customer_full=self.customer_full_var.get().strip(),
             customer_abbrev=self.customer_abbrev_var.get().strip(),
             quarter=self.quarter_var.get().strip(),
-            sale=self.sale_var.get().strip(),
+            sale=sale,
             report_type=self.report_type_var.get().strip(),
+            language=self.language_var.get().strip(),
+            report_date=self.report_date_var.get().strip(),
             customers=customers,
+            sales=sales,
             engineers=engineers,
             change_records=[
                 {
-                    "date": datetime.now().strftime("%d-%b-%Y"),
-                    "author": self.engineer_name_var.get().strip(),
+                    "date": self.report_date_var.get().strip() or datetime.now().strftime("%d-%b-%Y"),
+                    "author": first_engineer,
                     "version": "1.0",
                     "ref": "Initial Document",
                 }
@@ -292,10 +468,12 @@ class PMDocumentConverterApp(ctk.CTk):
         )
 
     def _request(self) -> ExportRequest:
+        output_dir = self.output_dir_var.get().strip()
         return ExportRequest(
             zip_path=Path(self.zip_path_var.get().strip()),
-            output_dir=Path(self.output_dir_var.get().strip()),
+            output_dir=Path(output_dir) if output_dir else None,
             metadata=self._metadata(),
+            create_pdf=self.create_pdf_var.get(),
         )
 
     def _start_export(self) -> None:

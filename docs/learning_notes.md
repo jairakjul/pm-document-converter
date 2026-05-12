@@ -343,6 +343,24 @@ Measure package folders before optimizing. Remove only files that have a clear r
 Run one full export through the packaged executable to confirm chart generation still works after the size cleanup.
 
 ## Task
+Verify the downloaded macOS build artifact structure from Windows.
+
+## What I Learned
+The downloaded file is a ZIP that contains the GitHub Actions artifact ZIP, and that inner ZIP contains a structurally valid `PMDocumentConverter.app` bundle.
+
+## Key Decisions
+Verified bundle structure non-destructively by inspecting the ZIP contents, `Info.plist`, `_CodeSignature`, Mach-O header, and expected executable/resource paths instead of extracting or modifying the artifact.
+
+## Mistakes / Risks to Watch
+Structural verification from Windows is not the same as a runtime validation on macOS. This check cannot confirm launching, Gatekeeper acceptance, or notarization status.
+
+## Reusable Patterns
+For macOS artifacts downloaded from CI, expect one extra ZIP wrapper around the real artifact. Verify the app bundle by checking `Contents/Info.plist`, `Contents/MacOS/<app>`, `Contents/_CodeSignature`, and a Mach-O magic header.
+
+## Next Improvement
+Open `PMDocumentConverter.app` on a real Mac and confirm it launches, exports a DOCX, and is not blocked by Gatekeeper.
+
+## Task
 Add CircleCI automation for validation, Windows packaging, and artifacts.
 
 ## What I Learned
@@ -413,3 +431,201 @@ Before automating CI runs, verify three things: local folder is a Git repo, a re
 
 ## Next Improvement
 Create or connect a GitHub repository for `pm_document_converter_fresh`, then run the push and GitHub Actions workflow.
+
+## Task
+Compare Section 6 Tablespace Free Space against the reference screenshot and align the generated report output.
+
+## What I Learned
+The parser already had the raw inputs needed for the reference table. The mismatch was in the report logic: the old section showed free space inside currently allocated files, while the reference table shows used space from allocated files and remaining free space against each tablespace's maximum capacity.
+
+## Key Decisions
+Kept the parser unchanged and rebuilt Section 6 in `report_writer_light.py`. The new logic aggregates current allocation from `datafiles` and `tempfiles`, derives used MB from the parsed `pct_free` value, derives max MB from each file's max size or current size when autoextend is not available, and renders the full six-column table. Temporary tablespaces are included with used space set to zero. The section now highlights only critical rows and uses a section-specific table layout closer to the reference.
+
+## Mistakes / Risks to Watch
+The current row ordering includes a small preferred-order fallback so the sample report matches the reference more closely. If future customer ZIPs introduce new tablespaces, the section will still work, but the tie ordering among rows with the same displayed percentage may differ from a manually prepared legacy report.
+
+## Reusable Patterns
+When a report section looks wrong, check whether the parser is actually the problem. If the raw data is already present, prefer fixing the section-level transformation and rendering logic instead of introducing another parsing path.
+
+## Next Improvement
+Open the regenerated DOCX and verify the final Section 6 table visually in Word, especially column widths and the critical-row highlight, against the reference screenshot.
+
+## Task
+Run the current end-to-end smoke test after the Section 6 adjustment.
+
+## What I Learned
+The export pipeline is still stable after the tablespace-section rewrite. The real sample ZIP exported successfully, all validators passed, and the environment created a PDF in this run as well as the DOCX and parsed JSON.
+
+## Key Decisions
+Used the existing single-command quality gate, `scripts/export_and_validate_sample.py`, instead of piecemeal checks. That keeps the verification path consistent with how the project is already meant to be tested.
+
+## Mistakes / Risks to Watch
+The smoke test proves parser, writer, and validators are working together, but it does not replace manual visual review of the regenerated DOCX in Word. PDF creation can still vary by environment, so treat it as an environment-dependent bonus rather than the primary acceptance check.
+
+## Reusable Patterns
+After report-format changes, rerun the full export-and-validate command rather than only checking the changed section. That catches unintended regressions in other parts of the document.
+
+## Next Improvement
+Open the latest DOCX and confirm the final Section 6 visual layout against the reference screenshot before moving to the next report section.
+
+## Task
+Add a report cover page and align Section 4.8 Database Patch and Section 5.1 Performance Review closer to the reference screenshots.
+
+## What I Learned
+The current codebase already had enough raw source data to reproduce a much richer Section 5.1. The problem was not missing source data; it was that the parser flattened most of the section into summary metrics and the writer rendered only a simplified status table. The patch-version mismatch also came from reading the OPatch installer version instead of the actual Database Release Update version from `db_lsinventory.txt`.
+
+## Key Decisions
+Added a generated cover-page banner and a new cover-page renderer before the table of contents. Updated `parse_patch_info()` to prefer the real Database Release Update version (`19.15.0.0.220419`) from `db_lsinventory.txt`. Extended the parser to keep detailed 5.1 inputs: library-cache namespace rows, PIN/RELOAD values, shared-pool-reserved stats, and undo-segment rows. Replaced the simplified 5.1 summary table with a reference-style two-column Q&A layout that uses nested tables for the detailed answers.
+
+## Mistakes / Risks to Watch
+The cover page is programmatically generated to match the look and structure of the reference, but it is still an approximation rather than the exact original artwork. The manual TOC page numbers are now even more fragile because the new cover page and expanded 5.1 section shift downstream pagination.
+
+## Reusable Patterns
+When a report section is visually wrong but the raw source already contains the needed detail, store a richer intermediate structure in the parser and let the writer choose the final presentation. Also separate tool-version parsing from product-version parsing; `OPatch version` is not the same thing as the installed database RU level.
+
+## Next Improvement
+Replace the hard-coded table-of-contents page numbers with a safer approach, or regenerate them from the final DOCX structure after layout changes.
+
+## Task
+Remove the cover image above the title and make the cover title/date follow the values the user fills in the app.
+
+## What I Learned
+The cover title was already partly metadata-driven, but the date was not a real user-editable field. The GUI only generated a change-record date internally, which made the cover date effectively implicit rather than user-controlled.
+
+## Key Decisions
+Removed the cover banner image from the rendered first page. Added a new `report_date` field to `ReportMetadata`, exposed it in the CustomTkinter project form, and used it as the first source for the cover date. Kept the cover title driven by report metadata, with `report_type + db_name` as the primary title and metadata fallbacks when those are blank.
+
+## Mistakes / Risks to Watch
+The cover title now follows the user metadata more directly, but it still uses a fixed title pattern rather than a fully free-form cover-title field. If users later want a completely custom title string, that should be a separate explicit metadata field instead of overloading `project_name`.
+
+## Reusable Patterns
+If a value must appear in the final document exactly as the user expects, expose it as a first-class metadata field in the UI and carry it through the service layer, instead of deriving it indirectly at render time.
+
+## Next Improvement
+If needed, add a dedicated `cover_title` field so users can override the default `report_type + db_name` title pattern without changing other metadata.
+
+## Task
+Compare and adjust Section 2.2 Oracle requirement output to match the richer reference layout.
+
+## What I Learned
+The existing Section 2.2 was functionally correct but too simplified. The reference report does not use a compact pass/fail matrix there; it uses a three-column comparison table with richer current-server details, including a nested disk-space table and explicit OS, RAM, tmp, JDK, and kernel-setting rows.
+
+## Key Decisions
+Replaced the old Section 2.2 pass/fail table with a custom three-column table: `Requirement`, `Minimum Requirement`, and `Current Server Specification`. Kept the heading prefixed with `2.2 Compare to Oracle requirement` so existing validators still pass, but appended the hostname for closer parity with the reference. Used a nested disk table inside the current-specification column to mirror the reference structure.
+
+## Mistakes / Risks to Watch
+This section now intentionally overlaps somewhat with details that still appear later in `2.3 User's environment`. That duplication is acceptable for report parity, but if the document is later optimized for concision instead of reference matching, Section 2 should be consolidated rather than expanded further.
+
+## Reusable Patterns
+When a reference section relies on a mixed layout, use a custom outer table with nested inner tables instead of trying to force everything through one generic helper. Keep validators stable by extending heading text from the existing prefix rather than replacing it outright.
+
+## Next Improvement
+Open the regenerated DOCX and compare the Section 2.2 row heights and nested disk-table widths against the screenshot; the content is aligned now, but the remaining gap is visual spacing.
+
+## Task
+Build the current Windows EXE app from the latest report-generator code.
+
+## What I Learned
+The existing PyInstaller packaging flow still works after the recent cover-page and report-layout changes. No packaging-specific code change was required for this build; the current spec and build script remained valid.
+
+## Key Decisions
+Used the existing repeatable packaging entrypoint, `scripts/build_desktop.ps1`, instead of invoking PyInstaller ad hoc. That keeps the build consistent with the documented project workflow and avoids drift between manual builds and future CI packaging.
+
+## Mistakes / Risks to Watch
+An EXE build succeeding does not prove the packaged app visually matches the latest DOCX expectations. Packaging should still be followed by a real smoke test in the built GUI, selecting a ZIP and generating output in a fresh folder.
+
+## Reusable Patterns
+Keep desktop packaging behind one build script and one spec file. That makes rebuilds predictable after report-writer changes and reduces the chance of “works locally, packaged build broken” drift.
+
+## Next Improvement
+Run the packaged EXE once, export a fresh report through the GUI, and confirm the generated DOCX matches the script-based output.
+
+## Task
+Improve the Section 2.2 Oracle requirement table layout so the nested disk-space table looks closer to the reference report and stops wrapping unpredictably.
+
+## What I Learned
+The main layout problem was not the data itself; it was that the outer three-column table widths exceeded the printable page width. Word compensated by shrinking and wrapping the nested disk table aggressively, which made filesystem and mount-point text break awkwardly.
+
+## Key Decisions
+Reduced the outer Section 2.2 column widths to fit the actual page, added explicit cell margins, forced the nested disk table to use fixed column widths, and top-aligned the large cells so the Linux Disk Space row reads more like the reference layout.
+
+## Mistakes / Risks to Watch
+Nested tables in `python-docx` are sensitive to total width. If future edits increase outer widths again, Word will silently reflow the nested table and the layout will degrade even though the document still validates structurally.
+
+## Reusable Patterns
+For DOCX sections that embed a table inside another table, treat the printable page width as a hard constraint and assign explicit widths to both the parent columns and the nested child columns. Do not rely on Word autofit for dense operational tables.
+
+## Next Improvement
+Open the regenerated DOCX in Word and inspect only Section 2.2 at normal zoom; if the mounted-on column is still too tight, trim the disk rows shown there or widen that child column by borrowing space from the numeric columns.
+
+## Task
+Rebuild the Windows EXE after the latest Section 2.2 table-layout changes.
+
+## What I Learned
+The packaging flow remained stable after the nested-table layout changes. The EXE can be rebuilt without touching the PyInstaller spec, which means the report-writer changes are still compatible with the existing desktop packaging setup.
+
+## Key Decisions
+Used the existing `scripts/build_desktop.ps1` entrypoint again and verified the produced EXE by checking its path, size, and write time instead of assuming the build output was current.
+
+## Mistakes / Risks to Watch
+Packaging success only proves the app bundles correctly. It does not prove the GUI export path or final Word output still looks right, so a packaged-app smoke test remains the next real acceptance check.
+
+## Reusable Patterns
+After report-writer layout changes, rebuild the packaged app from the same scripted entrypoint and verify the artifact metadata immediately. That catches stale-dist confusion before manual testing starts.
+
+## Next Improvement
+Launch the rebuilt EXE, export one report through the GUI into a clean folder, and compare the generated DOCX against the script-generated output.
+
+## Task
+Fix the Section 2.2 nested disk table overflowing past the right page edge in Word.
+
+## What I Learned
+Even after the first layout cleanup, the parent and child table widths were still too large in combination. In Word, nested tables do not respect the intended visual width if the total requested width exceeds the actual parent cell width, so the child table spilled past the page boundary.
+
+## Key Decisions
+Reduced the Section 2.2 outer table widths again, shrank the nested disk-table column widths, reduced cell padding, and lowered the nested-table font slightly. The goal was not to change content, only to keep the whole structure inside the printable area.
+
+## Mistakes / Risks to Watch
+This section is near the practical limit of how much dense filesystem data fits into a nested Word table. If more disk rows or longer mount paths appear in future samples, the layout may degrade again unless the section is simplified or split.
+
+## Reusable Patterns
+For dense DOCX tables, solve overflow by reducing total width first, then margins, then font size. Relying on Word to auto-resolve an oversized nested table produces unstable results across machines.
+
+## Next Improvement
+Open the regenerated DOCX and check the right edge of Section 2.2 in Word. If any row still clips, the next step is to abbreviate the mounted path column or split Linux Disk Space into its own full-width table.
+
+## Task
+Rebuild the EXE again after the overflow fix and handle the locked `dist` folder caused by the running packaged app.
+
+## What I Learned
+PyInstaller could not rebuild while the previous `PMDocumentConverter.exe` process was still running from the `dist` folder. The failure was not a packaging/config issue; it was a standard Windows file lock on an in-use packaged binary and one of its bundled modules.
+
+## Key Decisions
+Identified the running `PMDocumentConverter` process, stopped it, and reran the existing build script. Verified the rebuilt EXE by checking its file size and fresh write time instead of assuming the second build had replaced the earlier artifact.
+
+## Mistakes / Risks to Watch
+If the packaged app is left open, any rebuild into the same `dist` directory can fail with `PermissionError` during the `COLLECT` phase. That failure looks noisy in PyInstaller output, but the root cause is simply that the old app instance still owns files under `dist`.
+
+## Reusable Patterns
+When a Windows packaged-app rebuild fails at `Removing dir ... dist\\...` or `COLLECT`, check for a running instance of the same EXE before changing build scripts. Treat `dist` locks as an environment/process issue first, not a packaging regression.
+
+## Next Improvement
+Run the rebuilt EXE once and export a report through the GUI so the packaged app path is validated after the latest Section 2.2 layout fixes.
+
+## Task
+Adjust the Table of Contents styling and add a footer with last-update date, confidentiality text, and automatic page number.
+
+## What I Learned
+The generated TOC was structurally useful but visually different from the reference. The reference uses a boxed TOC title, smaller black TOC entries with dot leaders, and a footer on report pages that includes last-update date, confidentiality text, and page number.
+
+## Key Decisions
+Changed the TOC title from a standalone large paragraph to a bordered one-cell table, added missing subsection rows, tightened TOC font sizes and spacing, and added a section footer with a Word `PAGE` field. The first cover page uses a different first-page footer setting so the footer starts on the report pages.
+
+## Mistakes / Risks to Watch
+The TOC is still manually generated with hard-coded page numbers. The footer page number updates automatically in Word, but TOC page numbers do not. Future layout changes can make the TOC page numbers stale unless the report writer is changed to use real Word TOC fields or a post-generation page-number update workflow.
+
+## Reusable Patterns
+For reference-style DOCX output, use simple Word structures that behave predictably: a one-cell table for boxed titles, tab stops with dot leaders for TOC rows, and Word field XML for dynamic page numbers.
+
+## Next Improvement
+Replace the manual TOC page-number list with a real Word TOC field or a reliable post-generation update step if exact pagination becomes a release requirement.

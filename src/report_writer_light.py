@@ -1,11 +1,13 @@
 from pathlib import Path
 from datetime import datetime
+import json
 import re
+import sys
 
 from docx import Document
 from docx.shared import RGBColor, Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
@@ -13,6 +15,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
+from matplotlib.patches import Circle, Arc
+import numpy as np
 
 
 BLUE = "0000FF"
@@ -25,6 +29,90 @@ WARNING_YELLOW = "FFFF00"
 OK_GREEN = "92D050"
 WHITE = "FFFFFF"
 BLACK = "000000"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_TRANSLATION_CACHE: dict[str, dict[str, str]] = {}
+
+
+def _translation_roots() -> list[Path]:
+    roots = [PROJECT_ROOT / "translations"]
+    bundled_root = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT)) / "translations"
+    if bundled_root not in roots:
+        roots.insert(0, bundled_root)
+    return roots
+
+
+def _load_translations(language_code: str) -> dict[str, str]:
+    code = "th" if language_code == "th" else "en"
+    if code in _TRANSLATION_CACHE:
+        return _TRANSLATION_CACHE[code]
+
+    translations: dict[str, str] = {}
+    for root in _translation_roots():
+        path = root / f"{code}.json"
+        if not path.exists():
+            continue
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = {}
+        if isinstance(loaded, dict):
+            translations = {str(key): str(value) for key, value in loaded.items()}
+            break
+
+    _TRANSLATION_CACHE[code] = translations
+    return translations
+
+
+def _report_language(data: dict) -> str:
+    language = str(data.get("gui_metadata", {}).get("language", "English")).strip().lower()
+    return "th" if language.startswith(("thai", "th")) else "en"
+
+
+def _t(data: dict, text: str) -> str:
+    return _load_translations(_report_language(data)).get(text, text)
+
+
+def _report_type_label(data: dict, report_type: str) -> str:
+    return _t(data, report_type)
+
+
+def _footer_last_update(gui_meta: dict) -> str:
+    candidates = [str(gui_meta.get("report_date", "")).strip()]
+    change_records = gui_meta.get("change_records", [])
+    if change_records:
+        candidates.append(str(change_records[0].get("date", "")).strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        for fmt in (
+            "%d-%b-%Y",
+            "%d %b %Y",
+            "%d-%B-%Y",
+            "%d %B %Y",
+            "%Y-%m-%d",
+            "%d/%m/%Y",
+            "%m/%d/%Y",
+            "%B %d, %Y",
+        ):
+            try:
+                dt = datetime.strptime(candidate, fmt)
+                return f"{dt.month}/{dt.day}/{dt.year}"
+            except ValueError:
+                continue
+        return candidate
+
+    today = datetime.now()
+    return f"{today.month}/{today.day}/{today.year}"
+MFEC_LOGO_PATHS = [
+    PROJECT_ROOT / "assets" / "mfec_logo.png",
+    Path(r"C:\Users\HP\Pictures\Picture2.png"),
+    Path(r"C:\Users\HP\Pictures\Picture1.png"),
+]
+COVER_BANNER_PATHS = [
+    PROJECT_ROOT / "assets" / "cover_banner.jpg",
+    Path(r"C:\Users\HP\Pictures\Picture1.jpg"),
+]
 
 
 # =========================================================
@@ -40,6 +128,20 @@ def set_cell_shading(cell, fill):
     shd.set(qn("w:fill"), fill)
 
 
+def get_mfec_logo_path():
+    for path in MFEC_LOGO_PATHS:
+        if path.exists():
+            return path
+    return None
+
+
+def get_cover_banner_path():
+    for path in COVER_BANNER_PATHS:
+        if path.exists():
+            return path
+    return None
+
+
 def set_cell_text(cell, text, bold=False, color=BLACK, size=8, align="left"):
     cell.text = ""
     p = cell.paragraphs[0]
@@ -52,7 +154,7 @@ def set_cell_text(cell, text, bold=False, color=BLACK, size=8, align="left"):
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
     run = p.add_run(str(text))
-    run.font.name = "Arial"
+    run.font.name = "Tahoma"
     run.font.size = Pt(size)
     run.font.bold = bold
     run.font.color.rgb = RGBColor.from_string(color)
@@ -109,16 +211,313 @@ def set_doc_layout(doc):
     section.bottom_margin = Inches(0.55)
     section.left_margin = Inches(0.55)
     section.right_margin = Inches(0.55)
+    section.different_first_page_header_footer = True
 
     styles = doc.styles
-    styles["Normal"].font.name = "Arial"
+    styles["Normal"].font.name = "Tahoma"
     styles["Normal"].font.size = Pt(8)
+
+
+def add_report_footer(doc, data):
+    gui_meta = data.get("gui_metadata", {})
+    report_date = _footer_last_update(gui_meta)
+
+    confidential_text = "MFEC & SLI Confidential"
+
+    section = doc.sections[0]
+    footer = section.footer
+    footer.is_linked_to_previous = False
+
+    paragraph = footer.paragraphs[0]
+    paragraph.text = ""
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    add_top_border(paragraph)
+
+    table = footer.add_table(rows=2, cols=3, width=Inches(7.2))
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    set_table_column_widths(table, [Inches(2.2), Inches(2.8), Inches(2.2)])
+
+    left = table.cell(0, 0).paragraphs[0]
+    left.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    run = left.add_run(f"Last Update.\n{report_date}")
+    run.font.name = "Tahoma"
+    run.font.size = Pt(8)
+    run.font.italic = True
+    run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
+
+    middle = table.cell(0, 1).paragraphs[0]
+    middle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = middle.add_run(confidential_text)
+    run.font.name = "Tahoma"
+    run.font.size = Pt(8)
+    run.font.italic = True
+    run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
+
+    right = table.cell(0, 2).paragraphs[0]
+    right.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run = right.add_run("Page ")
+    run.font.name = "Tahoma"
+    run.font.size = Pt(8)
+    run.font.italic = True
+    run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
+    add_page_number_field(right)
+
+    swatch_cell = table.cell(1, 1)
+    swatch_paragraph = swatch_cell.paragraphs[0]
+    swatch_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for color in ("A6A1D6", "ADA5F7", "B9CBFA", "D8ECFB"):
+        swatch = swatch_paragraph.add_run("  ")
+        swatch.font.size = Pt(7)
+        swatch.font.highlight_color = None
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:fill"), color)
+        swatch._r.get_or_add_rPr().append(shd)
+        spacer = swatch_paragraph.add_run("  ")
+        spacer.font.size = Pt(7)
+
+    for row in table.rows:
+        for cell in row.cells:
+            set_cell_margins(cell, top=0, bottom=0, left=0, right=0)
+            for p in cell.paragraphs:
+                p.paragraph_format.space_before = Pt(0)
+                p.paragraph_format.space_after = Pt(0)
+
+
+def add_report_header(doc, data):
+    gui_meta = data.get("gui_metadata", {})
+    project_no = str(gui_meta.get("project_no", "")).strip()
+
+    section = doc.sections[0]
+    header = section.header
+    header.is_linked_to_previous = False
+
+    paragraph = header.paragraphs[0]
+    paragraph.text = ""
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+
+    table = header.add_table(rows=1, cols=2, width=Inches(7.2))
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    set_table_column_widths(table, [Inches(6.1), Inches(1.1)])
+
+    left_cell = table.cell(0, 0)
+    right_cell = table.cell(0, 1)
+    set_cell_margins(left_cell, top=0, bottom=0, left=0, right=0)
+    set_cell_margins(right_cell, top=0, bottom=0, left=0, right=0)
+
+    left_p = left_cell.paragraphs[0]
+    left_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    left = left_p.add_run(project_no)
+    left.font.name = "Tahoma"
+    left.font.size = Pt(9)
+    left.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
+
+    right_p = right_cell.paragraphs[0]
+    right_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    logo_path = get_mfec_logo_path()
+    if logo_path:
+        right_p.add_run().add_picture(str(logo_path), width=Inches(0.82))
+    else:
+        logo = right_p.add_run("MFEC")
+        logo.font.name = "Tahoma"
+        logo.font.size = Pt(18)
+        logo.font.bold = True
+        logo.font.color.rgb = RGBColor(0x9A, 0x9A, 0x9A)
+
+    line = header.add_paragraph()
+    line.paragraph_format.space_before = Pt(0)
+    line.paragraph_format.space_after = Pt(0)
+    add_bottom_border(line, color="808080", size="4", space="1")
+
+
+def add_bottom_border(paragraph, color=BLUE, size="6", space="1"):
+    p_pr = paragraph._p.get_or_add_pPr()
+    p_bdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), size)
+    bottom.set(qn("w:space"), space)
+    bottom.set(qn("w:color"), color)
+    p_bdr.append(bottom)
+    p_pr.append(p_bdr)
+
+
+def add_top_border(paragraph, color="808080", size="4", space="1"):
+    p_pr = paragraph._p.get_or_add_pPr()
+    p_bdr = OxmlElement("w:pBdr")
+    top = OxmlElement("w:top")
+    top.set(qn("w:val"), "single")
+    top.set(qn("w:sz"), size)
+    top.set(qn("w:space"), space)
+    top.set(qn("w:color"), color)
+    p_bdr.append(top)
+    p_pr.append(p_bdr)
+
+
+def add_page_number_field(paragraph):
+    run = paragraph.add_run()
+    fld_char_begin = OxmlElement("w:fldChar")
+    fld_char_begin.set(qn("w:fldCharType"), "begin")
+
+    instr_text = OxmlElement("w:instrText")
+    instr_text.set(qn("xml:space"), "preserve")
+    instr_text.text = "PAGE"
+
+    fld_char_separate = OxmlElement("w:fldChar")
+    fld_char_separate.set(qn("w:fldCharType"), "separate")
+
+    text = OxmlElement("w:t")
+    text.text = "1"
+
+    fld_char_end = OxmlElement("w:fldChar")
+    fld_char_end.set(qn("w:fldCharType"), "end")
+
+    run._r.append(fld_char_begin)
+    run._r.append(instr_text)
+    run._r.append(fld_char_separate)
+    run._r.append(text)
+    run._r.append(fld_char_end)
+    run.font.name = "Tahoma"
+    run.font.size = Pt(8)
+    run.font.italic = True
+    run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
+    return run
+
+
+def set_paragraph_outline_level(paragraph, level):
+    p_pr = paragraph._p.get_or_add_pPr()
+    outline = p_pr.find(qn("w:outlineLvl"))
+    if outline is None:
+        outline = OxmlElement("w:outlineLvl")
+        p_pr.append(outline)
+    outline.set(qn("w:val"), str(level))
+
+
+def add_toc_field(paragraph):
+    run = paragraph.add_run()
+    fld_char_begin = OxmlElement("w:fldChar")
+    fld_char_begin.set(qn("w:fldCharType"), "begin")
+
+    instr_text = OxmlElement("w:instrText")
+    instr_text.set(qn("xml:space"), "preserve")
+    instr_text.text = r'TOC \o "1-3" \h \z \u'
+
+    fld_char_separate = OxmlElement("w:fldChar")
+    fld_char_separate.set(qn("w:fldCharType"), "separate")
+
+    placeholder = OxmlElement("w:t")
+    placeholder.text = "Right-click and update field to refresh table of contents."
+
+    fld_char_end = OxmlElement("w:fldChar")
+    fld_char_end.set(qn("w:fldCharType"), "end")
+
+    run._r.append(fld_char_begin)
+    run._r.append(instr_text)
+    run._r.append(fld_char_separate)
+    run._r.append(placeholder)
+    run._r.append(fld_char_end)
+    run.font.name = "Tahoma"
+    run.font.size = Pt(8)
+    return run
+
+
+def set_update_fields_on_open(doc):
+    settings = doc.settings.element
+    update_fields = settings.find(qn("w:updateFields"))
+    if update_fields is None:
+        update_fields = OxmlElement("w:updateFields")
+        settings.append(update_fields)
+    update_fields.set(qn("w:val"), "true")
+
+
+def clear_cell(cell):
+    cell._tc.clear_content()
+    cell._tc.append(OxmlElement("w:p"))
+
+
+def set_cell_margins(cell, top=40, bottom=40, left=60, right=60):
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_mar = tc_pr.first_child_found_in("w:tcMar")
+    if tc_mar is None:
+        tc_mar = OxmlElement("w:tcMar")
+        tc_pr.append(tc_mar)
+
+    for edge, value in (("top", top), ("bottom", bottom), ("left", left), ("right", right)):
+        margin = tc_mar.find(qn(f"w:{edge}"))
+        if margin is None:
+            margin = OxmlElement(f"w:{edge}")
+            tc_mar.append(margin)
+        margin.set(qn("w:w"), str(value))
+        margin.set(qn("w:type"), "dxa")
+
+
+def set_table_column_widths(table, widths):
+    for row in table.rows:
+        for index, width in enumerate(widths):
+            if index < len(row.cells):
+                row.cells[index].width = width
+
+
+def set_fixed_table_grid(table, widths):
+    table.autofit = False
+    tbl_pr = table._tbl.tblPr
+    layout = tbl_pr.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(layout)
+    layout.set(qn("w:type"), "fixed")
+
+    old_grid = table._tbl.tblGrid
+    if old_grid is not None:
+        table._tbl.remove(old_grid)
+    grid = OxmlElement("w:tblGrid")
+    for width in widths:
+        col = OxmlElement("w:gridCol")
+        col.set(qn("w:w"), str(int(width.inches * 1440)))
+        grid.append(col)
+    table._tbl.insert(0, grid)
+    set_table_column_widths(table, widths)
+
+
+def add_nested_table(cell, headers, rows, header_fill=LIGHT_GRAY, header_color=BLACK, font_size=7, column_widths=None):
+    clear_cell(cell)
+    table = cell.add_table(rows=1, cols=len(headers))
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.autofit = False
+    set_table_borders(table)
+    if column_widths:
+        set_fixed_table_grid(table, column_widths)
+
+    for i, header in enumerate(headers):
+        set_cell_shading(table.rows[0].cells[i], header_fill)
+        set_cell_text(table.rows[0].cells[i], header, bold=True, color=header_color, size=font_size)
+        table.rows[0].cells[i].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+        set_cell_margins(table.rows[0].cells[i], top=25, bottom=25, left=40, right=40)
+
+    for row in rows:
+        cells = table.add_row().cells
+        for i, header in enumerate(headers):
+            align = "left" if i == 0 else "right"
+            set_cell_shading(cells[i], WHITE)
+            set_cell_text(cells[i], row.get(header, ""), size=font_size, align=align)
+            cells[i].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            set_cell_margins(cells[i], top=20, bottom=20, left=35, right=35)
+
+    if column_widths:
+        set_fixed_table_grid(table, column_widths)
+
+    return table
 
 
 def add_heading1(doc, text):
     p = doc.add_paragraph()
+    set_paragraph_outline_level(p, 0)
     run = p.add_run(text)
-    run.font.name = "Arial"
+    run.font.name = "Tahoma"
     run.font.size = Pt(14)
     run.font.bold = True
     run.font.color.rgb = RGBColor.from_string(BLUE)
@@ -143,8 +542,9 @@ def add_heading1(doc, text):
 
 def add_heading2(doc, text):
     p = doc.add_paragraph()
+    set_paragraph_outline_level(p, 1)
     run = p.add_run(text)
-    run.font.name = "Arial"
+    run.font.name = "Tahoma"
     run.font.size = Pt(10)
     run.font.bold = True
     run.font.italic = True
@@ -158,6 +558,7 @@ def add_heading2(doc, text):
 
 def add_heading3(doc, text):
     p = doc.add_paragraph()
+    set_paragraph_outline_level(p, 2)
     run = p.add_run(text)
     run.font.name = "Arial"
     run.font.size = Pt(9)
@@ -170,13 +571,33 @@ def add_heading3(doc, text):
     return p
 
 
-def add_normal(doc, text, size=8, bold=False):
+def add_normal(doc, text, size=8, bold=False, highlight_status_words=True):
     p = doc.add_paragraph()
-    run = p.add_run(str(text))
-    run.font.name = "Arial"
-    run.font.size = Pt(size)
-    run.font.bold = bold
-    run.font.color.rgb = RGBColor.from_string(BLACK)
+    text = str(text)
+    if highlight_status_words and re.search(r"\b(in)?sufficient\b", text, flags=re.IGNORECASE):
+        parts = re.split(r"\b(insufficient|sufficient)\b", text, flags=re.IGNORECASE)
+        for part in parts:
+            if not part:
+                continue
+            run = p.add_run(part)
+            run.font.name = "Arial"
+            run.font.size = Pt(size)
+            run.font.bold = bold
+            lower_part = part.lower()
+            if lower_part == "sufficient":
+                run.font.bold = True
+                run.font.color.rgb = RGBColor(0x00, 0xB0, 0x50)
+            elif lower_part == "insufficient":
+                run.font.bold = True
+                run.font.color.rgb = RGBColor.from_string(RED)
+            else:
+                run.font.color.rgb = RGBColor.from_string(BLACK)
+    else:
+        run = p.add_run(text)
+        run.font.name = "Arial"
+        run.font.size = Pt(size)
+        run.font.bold = bold
+        run.font.color.rgb = RGBColor.from_string(BLACK)
     return p
 
 
@@ -205,22 +626,379 @@ def add_small_table(doc, headers, rows, header_fill=LIGHT_GRAY, highlight_rule=N
     return table
 
 
+def _safe_float(value, default=0.0):
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_tablespace_capacity_rows(data):
+    tablespaces = {}
+
+    def ensure_entry(name):
+        entry = tablespaces.get(name)
+        if entry is None:
+            entry = {
+                "name": name,
+                "allocated_mb": 0.0,
+                "max_mb": 0.0,
+                "used_mb": 0.0,
+                "free_of_max_mb": 0.0,
+                "free_pct_of_max": 0.0,
+                "status": "OK",
+                "is_temp": False,
+            }
+            tablespaces[name] = entry
+        return entry
+
+    for source_key, is_temp in (("datafiles", False), ("tempfiles", True)):
+        for file_row in data.get(source_key, []):
+            name = str(file_row.get("tbs_name", "")).strip()
+            if not name:
+                continue
+
+            allocated_mb = _safe_float(file_row.get("size_mb", 0))
+            configured_max_mb = _safe_float(file_row.get("max_mb", 0))
+            effective_max_mb = configured_max_mb if configured_max_mb > 0 else allocated_mb
+
+            entry = ensure_entry(name)
+            entry["allocated_mb"] += allocated_mb
+            entry["max_mb"] += effective_max_mb
+            entry["is_temp"] = entry["is_temp"] or is_temp
+
+    tablespace_free = data.get("tablespace_free", {})
+    for name, entry in tablespaces.items():
+        if entry["is_temp"]:
+            used_mb = 0.0
+        else:
+            free_pct_of_allocated = _safe_float(tablespace_free.get(name, {}).get("pct_free", 0))
+            used_mb = entry["allocated_mb"] * max(0.0, 1 - (free_pct_of_allocated / 100.0))
+            if not tablespace_free.get(name):
+                used_mb = entry["allocated_mb"]
+
+        free_of_max_mb = max(entry["max_mb"] - used_mb, 0.0)
+        free_pct_of_max = (free_of_max_mb / entry["max_mb"] * 100.0) if entry["max_mb"] else 0.0
+
+        entry["used_mb"] = used_mb
+        entry["free_of_max_mb"] = free_of_max_mb
+        entry["free_pct_of_max"] = free_pct_of_max
+        if free_pct_of_max < 10:
+            entry["status"] = "Critical"
+        elif free_pct_of_max < 20:
+            entry["status"] = "Warning"
+
+    preferred_order = [
+        "ICOM_TBS",
+        "TSLI_COMP_VERF_TBS",
+        "STATSPACK",
+        "SYSAUX",
+        "SYSTEM",
+        "USERS",
+        "AUDIT_TBS",
+        "UNDOTBS1",
+        "MONITOR_TBS",
+        "TSLI_COMP_VERF_TMP",
+        "ICOM_TMP",
+        "ICOM_HOLD_TBS",
+        "TMP",
+    ]
+    preferred_rank = {name: index for index, name in enumerate(preferred_order)}
+
+    return sorted(
+        tablespaces.values(),
+        key=lambda row: (
+            round(row["free_pct_of_max"], 2),
+            preferred_rank.get(row["name"], 999),
+            row["name"],
+        ),
+    )
+
+
+def _cover_report_date(gui_meta, source_zip):
+    change_records = gui_meta.get("change_records", [])
+    candidate = str(gui_meta.get("report_date", "")).strip()
+
+    if candidate:
+        for fmt in ("%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%d", "%d/%m/%Y", "%B %d, %Y"):
+            try:
+                dt = datetime.strptime(candidate, fmt)
+                return dt.strftime("%B %d, %Y").replace(" 0", " ")
+            except ValueError:
+                continue
+
+    if change_records:
+        candidate = str(change_records[0].get("date", "")).strip()
+
+    if not candidate:
+        match = re.search(r"(20\d{6})", source_zip.stem)
+        if match:
+            try:
+                candidate = datetime.strptime(match.group(1), "%Y%m%d").strftime("%d-%b-%Y")
+            except ValueError:
+                candidate = ""
+
+    for fmt in ("%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            dt = datetime.strptime(candidate, fmt)
+            return dt.strftime("%B %d, %Y").replace(" 0", " ")
+        except ValueError:
+            continue
+
+    return datetime.now().strftime("%B %d, %Y").replace(" 0", " ")
+
+
+def create_cover_banner(output_dir):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "cover_banner.png"
+
+    width, height = 1400, 360
+    x = np.linspace(0.0, 1.0, width)
+    y = np.linspace(0.0, 1.0, height)
+    xx, yy = np.meshgrid(x, y)
+
+    base = np.zeros((height, width, 3))
+    base[:, :, 0] = 0.10 + 0.12 * (1 - xx) + 0.04 * yy
+    base[:, :, 1] = 0.30 + 0.35 * (1 - np.abs(yy - 0.5)) + 0.10 * xx
+    base[:, :, 2] = 0.65 + 0.25 * (1 - xx * 0.6)
+
+    fig, ax = plt.subplots(figsize=(9.2, 2.5), dpi=150)
+    ax.imshow(base, extent=[0, 1, 0, 1], aspect="auto")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+
+    ax.axhspan(0.88, 1.0, color="#1100EE")
+
+    globe_fill = Circle((0.16, 0.48), 0.28, facecolor=(0.86, 0.96, 1.0, 0.70), edgecolor="#0B2BFF", linewidth=2)
+    globe_edge = Circle((0.16, 0.48), 0.28, facecolor=(0, 0, 0, 0), edgecolor="#0038FF", linewidth=2.2)
+    ax.add_patch(globe_fill)
+    ax.add_patch(globe_edge)
+
+    for offset in (-0.17, 0.0, 0.17):
+        ax.add_patch(Arc((0.16, 0.48), 0.56, 0.56 * max(0.18, 1 - abs(offset) * 1.8), angle=0, theta1=0, theta2=360, edgecolor="#1A4CFF", linewidth=1.0, alpha=0.75))
+    for offset in (-55, -20, 15, 50):
+        ax.add_patch(Arc((0.16, 0.48), 0.56, 0.56, angle=offset, theta1=35, theta2=145, edgecolor="#1A4CFF", linewidth=0.9, alpha=0.65))
+
+    continent_x = [0.05, 0.08, 0.10, 0.13, 0.15, 0.17, 0.19, 0.21, 0.20, 0.17, 0.14, 0.10]
+    continent_y = [0.65, 0.72, 0.70, 0.76, 0.70, 0.66, 0.60, 0.54, 0.46, 0.40, 0.44, 0.55]
+    ax.fill(continent_x, continent_y, color=(0.95, 1.0, 1.0, 0.9))
+    ax.fill([0.09, 0.11, 0.13, 0.12, 0.10], [0.39, 0.34, 0.28, 0.23, 0.18], color=(0.95, 1.0, 1.0, 0.85))
+
+    for x0 in np.linspace(0.36, 0.92, 7):
+        ax.plot([x0 - 0.08, x0 + 0.08], [0.30, 0.76], color=(0.70, 0.94, 1.0, 0.30), linewidth=4)
+
+    points = [(0.54, 0.60), (0.62, 0.66), (0.72, 0.54), (0.82, 0.70), (0.90, 0.52), (0.68, 0.38)]
+    for x0, y0 in points:
+        ax.scatter([x0], [y0], s=48, color=(1, 1, 1, 0.85), edgecolors=(0.72, 0.95, 1.0, 0.55), linewidths=1)
+    for (x1, y1), (x2, y2) in zip(points[:-1], points[1:]):
+        ax.plot([x1, x2], [y1, y2], color=(0.82, 0.97, 1.0, 0.55), linewidth=2)
+
+    digits = ["0101", "1010", "0011", "1100", "0110", "1001"]
+    coords = [(0.63, 0.82), (0.73, 0.76), (0.83, 0.80), (0.70, 0.22), (0.88, 0.30), (0.56, 0.18)]
+    for (x0, y0), text in zip(coords, digits):
+        ax.text(x0, y0, text, color=(0.85, 0.98, 1.0, 0.42), fontsize=28, fontweight="bold", rotation=18)
+
+    plt.tight_layout(pad=0)
+    plt.savefig(output_path, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+    return output_path
+
+
+def add_cover_page(doc, data, source_zip, output_dir):
+    gui_meta = data.get("gui_metadata", {})
+    db_name = gui_meta.get("db_name") or data.get("instance_name") or data.get("db_parameters", {}).get("db_name", "")
+    report_type = gui_meta.get("report_type") or "Preventive Maintenance"
+    project_name = str(gui_meta.get("project_name", "")).strip()
+    customer_name = (
+        str(gui_meta.get("customer_full", "")).strip()
+        or str(gui_meta.get("customer_name", "")).strip()
+        or next((row.get("name", "").strip() for row in gui_meta.get("customers", []) if row.get("name", "").strip()), "")
+        or str(gui_meta.get("customer_abbrev", "")).strip()
+    )
+    report_date = _cover_report_date(gui_meta, source_zip)
+
+    title_text = f"{_report_type_label(data, report_type)} {db_name}".strip()
+    if not title_text.strip():
+        title_text = project_name or _report_type_label(data, report_type)
+
+    confidential = doc.add_paragraph()
+    confidential.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    confidential.paragraph_format.space_before = Pt(22)
+    confidential.paragraph_format.space_after = Pt(6)
+    confidential_run = confidential.add_run("MFEC & SLI Confidential")
+    confidential_run.font.name = "Arial"
+    confidential_run.font.size = Pt(14)
+    confidential_run.font.color.rgb = RGBColor.from_string(BLUE)
+
+    blue_bar = doc.add_table(rows=1, cols=1)
+    blue_bar.alignment = WD_TABLE_ALIGNMENT.CENTER
+    blue_bar.autofit = False
+    set_table_column_widths(blue_bar, [Inches(7.3)])
+    blue_cell = blue_bar.cell(0, 0)
+    set_cell_margins(blue_cell, top=35, bottom=35, left=0, right=0)
+    set_cell_shading(blue_cell, BLUE)
+    blue_cell.text = ""
+
+    banner_path = get_cover_banner_path()
+    if banner_path:
+        banner = doc.add_paragraph()
+        banner.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        banner.paragraph_format.space_before = Pt(0)
+        banner.paragraph_format.space_after = Pt(20)
+        banner.add_run().add_picture(str(banner_path), width=Inches(7.3), height=Inches(1.85))
+
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    title.paragraph_format.space_before = Pt(0)
+    title.paragraph_format.space_after = Pt(0)
+    title_run = title.add_run(title_text)
+    title_run.font.name = "Arial"
+    title_run.font.size = Pt(25)
+    title_run.font.bold = True
+    title_run.font.color.rgb = RGBColor.from_string("FF6600")
+
+    if customer_name:
+        subtitle = doc.add_paragraph()
+        subtitle.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        subtitle.paragraph_format.space_after = Pt(14)
+        subtitle_run = subtitle.add_run(f"{_t(data, 'For')} {customer_name}")
+        subtitle_run.font.name = "Arial"
+        subtitle_run.font.size = Pt(22)
+        subtitle_run.font.color.rgb = RGBColor.from_string("FF0000")
+
+    divider = doc.add_paragraph()
+    divider.paragraph_format.space_before = Pt(8)
+    divider.paragraph_format.space_after = Pt(10)
+    add_bottom_border(divider, color=BLUE, size="6", space="1")
+
+    date_paragraph = doc.add_paragraph()
+    date_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    date_run = date_paragraph.add_run(f"{_t(data, 'Date')}: {report_date}")
+    date_run.font.name = "Arial"
+    date_run.font.size = Pt(17)
+    date_run.font.italic = True
+    date_run.font.color.rgb = RGBColor.from_string(BLUE)
+
+    spacer = doc.add_paragraph()
+    spacer.paragraph_format.space_before = Pt(42)
+    spacer.paragraph_format.space_after = Pt(0)
+    dpm_table = doc.add_table(rows=1, cols=2)
+    dpm_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    dpm_table.autofit = False
+    set_table_column_widths(dpm_table, [Inches(3.1), Inches(3.8)])
+
+    swatch_cell = dpm_table.cell(0, 0)
+    set_cell_margins(swatch_cell, top=0, bottom=0, left=24, right=0)
+    swatch_table = swatch_cell.add_table(rows=3, cols=5)
+    swatch_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    swatch_table.autofit = False
+    set_table_column_widths(
+        swatch_table,
+        [Inches(0.55), Inches(0.18), Inches(0.55), Inches(0.18), Inches(0.55)],
+    )
+    set_table_borders(swatch_table, color="FFFFFF", size="0")
+    swatch_rows = [
+        ["69B7B4", None, "7F98F2", None, "D9D9D9"],
+        [None, None, None, None, None],
+        ["6A67B6", None, "BBD9F4", None, "BFBFBF"],
+    ]
+    for row_index, row_colors in enumerate(swatch_rows):
+        row = swatch_table.rows[row_index]
+        row.height = Inches(0.55 if row_index != 1 else 0.18)
+        row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+        for cell, color in zip(row.cells, row_colors):
+            set_cell_margins(cell, top=0, bottom=0, left=0, right=0)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            set_cell_text(cell, "", size=1, align="center")
+            set_cell_shading(cell, color or WHITE)
+
+    dpm_cell = dpm_table.cell(0, 1)
+    set_cell_margins(dpm_cell, top=52, bottom=0, left=0, right=0)
+    dpm_p = dpm_cell.paragraphs[0]
+    dpm_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    dpm_run = dpm_p.add_run("By: Digital Platform and Management\n(DPM)\nMFEC Public Company Limited")
+    dpm_run.font.name = "Arial"
+    dpm_run.font.size = Pt(10)
+    dpm_run.font.bold = True
+
+    bottom_spacer = doc.add_paragraph()
+    bottom_spacer.paragraph_format.space_before = Pt(70)
+    bottom_spacer.paragraph_format.space_after = Pt(0)
+    cover_table = doc.add_table(rows=1, cols=3)
+    cover_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    cover_table.autofit = False
+    set_table_column_widths(cover_table, [Inches(1.7), Inches(2.65), Inches(2.65)])
+
+    logo_cell = cover_table.cell(0, 0)
+    set_cell_margins(logo_cell, top=0, bottom=0, left=0, right=0)
+    logo_paragraph = logo_cell.paragraphs[0]
+    logo_paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    logo_path = get_mfec_logo_path()
+    if logo_path:
+        logo_paragraph.add_run().add_picture(str(logo_path), width=Inches(1.55))
+    else:
+        run = logo_paragraph.add_run("MFEC")
+        run.font.name = "Arial"
+        run.font.size = Pt(32)
+        run.font.bold = True
+        run.font.color.rgb = RGBColor(0x40, 0x45, 0x4A)
+
+    office_cell = cover_table.cell(0, 1)
+    set_cell_margins(office_cell, top=0, bottom=0, left=15, right=15)
+    office_paragraph = office_cell.paragraphs[0]
+    office_run = office_paragraph.add_run(
+        "Head Office:\n"
+        "349 SJ Infinite One Business Complex,11th\n"
+        "Floor,Vibhavadi Rangsit Rd, Chompol, Chatuchak,\n"
+        "Bangkok 10900. Thailand Tel: +66 (0) 2821-7999\n"
+        "www.mfec.co.th"
+    )
+    office_run.font.name = "Arial"
+    office_run.font.size = Pt(7)
+    office_run.font.bold = False
+
+    dev_cell = cover_table.cell(0, 2)
+    set_cell_margins(dev_cell, top=0, bottom=0, left=15, right=0)
+    dev_paragraph = dev_cell.paragraphs[0]
+    dev_run = dev_paragraph.add_run(
+        "Development Center:\n"
+        "199 S-Oasis 21 Floor, Vibhavadi-Rangsit Rd.,\n"
+        "Chompol,Chatuchak, Bangkok 10900. Thailand"
+    )
+    dev_run.font.name = "Arial"
+    dev_run.font.size = Pt(7)
+
+    doc.add_page_break()
+
+
 # =========================================================
 # 0. Manual TOC
 # =========================================================
 
-def add_table_of_contents(doc):
-    """Generate a professional TOC with proper tab stops, dot leaders, and color-coded levels."""
+def add_table_of_contents(doc, data):
+    """Add a real Word TOC field that updates from paragraph outline levels."""
 
-    # --- Title ---
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_after = Pt(18)
-    run = p.add_run("Table of Contents")
-    run.font.name = "Arial"
-    run.font.size = Pt(18)
-    run.font.bold = True
-    run.font.color.rgb = RGBColor.from_string(BLUE)
+    title_table = doc.add_table(rows=1, cols=1)
+    title_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    title_table.autofit = False
+    set_table_borders(title_table, size="6")
+    set_table_column_widths(title_table, [Inches(4.2)])
+    title_cell = title_table.cell(0, 0)
+    set_cell_margins(title_cell, top=10, bottom=10, left=20, right=20)
+    set_cell_text(title_cell, _t(data, "Table of Contents"), bold=True, color=BLUE, size=14, align="center")
+
+    spacer = doc.add_paragraph()
+    spacer.paragraph_format.space_after = Pt(8)
+
+    toc_paragraph = doc.add_paragraph()
+    toc_paragraph.paragraph_format.space_before = Pt(0)
+    toc_paragraph.paragraph_format.space_after = Pt(0)
+    add_toc_field(toc_paragraph)
+
+    doc.add_page_break()
+    return
 
     # Define TOC entries:  (title, page_number, level)
     # level 0 = main section,  level 1 = sub-section,  level 2 = sub-sub-section
@@ -234,7 +1012,13 @@ def add_table_of_contents(doc):
         ("1.4 Change Record", 6, 1),
         ("1.5 Reviewers", 6, 1),
         ("2. Oracle minimum requirement", 7, 0),
+        ("2.1 Checking server machine specification", 7, 1),
+        ("2.2 Compare to Oracle requirement for MotifPRDDBN", 7, 1),
+        ("2.3 User's environment for MotifPRDDBN", 8, 1),
         ("3. System Checklist", 10, 0),
+        ("3.1 Hardware configuration for MotifPRDDBN", 10, 1),
+        ("3.2 Network configuration for MotifPRDDBN", 10, 1),
+        ("3.3 Crontab information for MotifPRDDBN", 10, 1),
         ("4. Database Information", 11, 0),
         ("4.1 Database Configuration.", 11, 1),
         ("4.2 Database Parameter", 11, 1),
@@ -249,8 +1033,11 @@ def add_table_of_contents(doc):
         ("5.2 Database Growth Rate", 18, 1),
         ("5.3 Performance Analysis", 19, 1),
         ("6. Tablespace Free Space", 23, 0),
+        ("6.1 Tablespace Free Space", 23, 1),
         ("7. Default tablespace and temporary tablespace", 24, 0),
+        ("7.1 Default tablespace and temporary tablespace", 24, 1),
         ("8. Database Registry", 26, 0),
+        ("8.1 Check Database Registry", 26, 1),
         ("APPENDIX A – Invalid Object", 27, 0),
         ("APPENDIX B – Information from alert log", 36, 0),
         ("APPENDIX C – SQL Statement should be to investigate", 37, 0),
@@ -261,21 +1048,21 @@ def add_table_of_contents(doc):
 
     # Style settings per level
     level_config = {
-        0: {"font_size": Pt(10), "bold": True,  "color": RGBColor(0x00, 0x00, 0xCC), "indent_cm": 0},
-        1: {"font_size": Pt(9),  "bold": False, "color": RGBColor(0x00, 0x70, 0xC0), "indent_cm": 0.8},
-        2: {"font_size": Pt(8),  "bold": False, "color": RGBColor(0x33, 0x33, 0x33), "indent_cm": 1.6},
+        0: {"font_size": Pt(6.7), "bold": False, "color": RGBColor(0x00, 0x00, 0x00), "indent_cm": 0},
+        1: {"font_size": Pt(6.4), "bold": False, "color": RGBColor(0x00, 0x00, 0x00), "indent_cm": 0.35},
+        2: {"font_size": Pt(6.2), "bold": False, "color": RGBColor(0x00, 0x00, 0x00), "indent_cm": 0.7},
     }
 
-    right_tab_pos = 9000  # EMU-like position in twentieths of a point (~16 cm)
+    right_tab_pos = 8600
 
     for title, page, level in toc_rows:
         cfg = level_config.get(level, level_config[0])
         p = doc.add_paragraph()
-        p.paragraph_format.space_before = Pt(1)
-        p.paragraph_format.space_after = Pt(1)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.line_spacing = 1.0
 
         # Set left indent
-        indent_twips = int(cfg["indent_cm"] * 567)  # 1 cm = 567 twips
         p.paragraph_format.left_indent = Pt(cfg["indent_cm"] * 28.35)
 
         # Add a right-aligned tab stop with dot leader via XML
@@ -314,8 +1101,8 @@ def add_table_of_contents(doc):
 # Defect / Summary
 # =========================================================
 
-def add_defect_classification(doc):
-    add_heading1(doc, "Defect Classification")
+def add_defect_classification(doc, data):
+    add_heading1(doc, _t(data, "Defect Classification"))
     add_normal(
         doc,
         "Each test will be either deemed as a pass or a severity level will be given using the following severity level classification.",
@@ -352,7 +1139,7 @@ def add_defect_classification(doc):
 def build_suggestion_summary(data):
     invalid_count = len(data.get("invalid_objects_list", []))
     patch_info = data.get("patch_info", [])
-    tablespace_free = data.get("tablespace_free", {})
+    tablespace_rows = _build_tablespace_capacity_rows(data)
     sec53 = data.get("section53", {})
     os_perf = data.get("os_perf", {})
     db_params = data.get("db_parameters", {})
@@ -366,15 +1153,11 @@ def build_suggestion_summary(data):
 
     # --- Tablespace status ---
     tbs_status = "OK"
-    for _, info in tablespace_free.items():
-        try:
-            pct_free = float(info.get("pct_free", 0))
-        except Exception:
-            pct_free = 100
-        if pct_free < 10:
+    for row in tablespace_rows:
+        if row["status"] == "Critical":
             tbs_status = "Critical"
             break
-        elif pct_free < 20:
+        elif row["status"] == "Warning":
             tbs_status = "Warning"
 
     # --- Invalid objects ---
@@ -475,7 +1258,7 @@ def build_suggestion_summary(data):
 
 
 def add_suggestion_summary(doc, data):
-    add_heading1(doc, "Suggestion Summary")
+    add_heading1(doc, _t(data, "Suggestion Summary"))
 
     rows = build_suggestion_summary(data)
 
@@ -508,25 +1291,27 @@ def add_suggestion_summary(doc, data):
 # =========================================================
 
 def add_general_project_information(doc, data, source_zip):
-    add_heading1(doc, "1. General Project Information")
+    add_heading1(doc, _t(data, "1. General Project Information"))
 
-    add_heading2(doc, "1.1 Project Information")
+    add_heading2(doc, _t(data, "1.1 Project Information"))
 
     gui_meta = data.get("gui_metadata", {})
     db_name = gui_meta.get("db_name") or data.get("instance_name") or data.get("db_parameters", {}).get("db_name", "")
+    sales_list = gui_meta.get("sales", [])
+    first_sale = sales_list[0] if sales_list else {}
     
     project_rows = [
         {"Field": "Project name", "Value": gui_meta.get("project_name", "MA Oracle 5 Years")},
         {"Field": "MFEC project no.", "Value": gui_meta.get("project_no", "")},
         {"Field": "MFEC sales name", "Value": gui_meta.get("sale", "")},
-        {"Field": "Phone no.", "Value": ""}, # Can be derived if sale has contact
-        {"Field": "Email address", "Value": ""},
+        {"Field": "Phone no.", "Value": first_sale.get("phone", "")},
+        {"Field": "Email address", "Value": first_sale.get("email", "")},
         {"Field": "Database name", "Value": db_name},
         {"Field": "Source ZIP", "Value": source_zip.name},
     ]
     add_small_table(doc, ["Field", "Value"], project_rows)
 
-    add_heading2(doc, "1.2 Customer Contact Information")
+    add_heading2(doc, _t(data, "1.2 Customer Contact Information"))
     cust_list = gui_meta.get("customers", [])
     if not cust_list:
         cust_list = [{"name": "", "phone": "", "email": ""}]
@@ -534,7 +1319,7 @@ def add_general_project_information(doc, data, source_zip):
     cust_rows = [{"Name": c.get("name",""), "Phone no.": c.get("phone",""), "Email address": c.get("email","")} for c in cust_list]
     add_small_table(doc, ["Name", "Phone no.", "Email address"], cust_rows)
 
-    add_heading2(doc, "1.3 MFEC Engineers' Information")
+    add_heading2(doc, _t(data, "1.3 MFEC Engineers' Information"))
     eng_list = gui_meta.get("engineers", [])
     if not eng_list:
         eng_list = [{"name": "", "phone": "", "email": ""}]
@@ -542,7 +1327,7 @@ def add_general_project_information(doc, data, source_zip):
     eng_rows = [{"Name": e.get("name",""), "Phone no.": e.get("phone",""), "Email address": e.get("email","")} for e in eng_list]
     add_small_table(doc, ["Name", "Phone no.", "Email address"], eng_rows)
 
-    add_heading2(doc, "1.4 Change Record")
+    add_heading2(doc, _t(data, "1.4 Change Record"))
     cr_list = gui_meta.get("change_records", [])
     if not cr_list:
         cr_list = [{"date": datetime.now().strftime("%d-%b-%Y"), "author": "", "version": "1.0", "ref": "Initial Document"}]
@@ -550,7 +1335,7 @@ def add_general_project_information(doc, data, source_zip):
     cr_rows = [{"Date": r.get("date",""), "Author": r.get("author",""), "Version": r.get("version",""), "Change Reference": r.get("ref","")} for r in cr_list]
     add_small_table(doc, ["Date", "Author", "Version", "Change Reference"], cr_rows)
 
-    add_heading2(doc, "1.5 Reviewers")
+    add_heading2(doc, _t(data, "1.5 Reviewers"))
     rev_list = gui_meta.get("reviewers", [])
     if not rev_list:
         rev_list = [{"date": "", "name": "", "position": ""}]
@@ -568,11 +1353,11 @@ def add_general_project_information(doc, data, source_zip):
 def add_oracle_minimum_requirement(doc, data):
     os_info = data.get("os_info", {})
 
-    add_heading1(doc, "2. Oracle minimum requirement")
+    add_heading1(doc, _t(data, "2. Oracle minimum requirement"))
 
     # ----- 2.1 Checking server machine specification -----
-    add_heading2(doc, "2.1 Checking server machine specification")
-    add_normal(doc, "Server machine specification collected from the operating system:")
+    add_heading2(doc, _t(data, "2.1 Checking server machine specification"))
+    add_normal(doc, _t(data, "Server machine specification collected from the operating system:"))
 
     spec_rows = [
         {"Item": "Hostname", "Detail": os_info.get("hostname", "")},
@@ -596,83 +1381,145 @@ def add_oracle_minimum_requirement(doc, data):
     ]
     add_small_table(doc, ["Item", "Detail"], spec_rows)
 
+    bundle_nodes = data.get("bundle_nodes", [])
+    visible_nodes = [
+        node for node in bundle_nodes
+        if node.get("os_info", {}).get("hostname") or node.get("has_database_results") or node.get("has_registry")
+    ]
+    if len(visible_nodes) > 1:
+        add_normal(doc, "Fast Assessment bundle sources detected:")
+        node_rows = []
+        for node in visible_nodes:
+            node_os = node.get("os_info", {})
+            node_rows.append(
+                {
+                    "Source ZIP": node.get("source", ""),
+                    "Hostname": node_os.get("hostname", ""),
+                    "IP Address": node_os.get("ip_address", ""),
+                    "Oracle SID": node_os.get("oracle_sid", ""),
+                    "Oracle Home": node_os.get("oracle_home", ""),
+                    "DB Results": "Yes" if node.get("has_database_results") else "No",
+                }
+            )
+        add_small_table(
+            doc,
+            ["Source ZIP", "Hostname", "IP Address", "Oracle SID", "Oracle Home", "DB Results"],
+            node_rows,
+        )
+
     # ----- 2.2 Compare to Oracle requirement -----
-    add_heading2(doc, "2.2 Compare to Oracle requirement")
-    add_normal(doc, "Compare current server specification with Oracle Database 19c minimum requirements:")
+    hostname = os_info.get("hostname", "")
+    compare_heading = f"{_t(data, '2.2 Compare to Oracle requirement')} {_t(data, 'For').lower()} {hostname}" if hostname else _t(data, "2.2 Compare to Oracle requirement")
+    add_heading2(doc, compare_heading)
+    add_normal(doc, _t(data, "Compare current server specification with Oracle Database 19c minimum requirements:"))
 
-    # Calculate comparison values
-    try:
-        ram_gb = float(os_info.get("total_ram_gb", "0") or "0")
-    except ValueError:
-        ram_gb = 0.0
+    compare_table = doc.add_table(rows=1, cols=3)
+    compare_table.style = "Table Grid"
+    compare_table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    compare_table.autofit = False
+    set_table_borders(compare_table)
+    set_fixed_table_grid(compare_table, [Inches(1.10), Inches(2.35), Inches(3.75)])
 
-    try:
-        swap_mb = float(os_info.get("swap_total_mb", "0") or "0")
-        swap_gb = swap_mb / 1024
-    except ValueError:
-        swap_gb = 0.0
+    compare_headers = ["Requirement", "Minimum\nRequirement", "Current Server Specification"]
+    for index, header in enumerate(compare_headers):
+        cell = compare_table.rows[0].cells[index]
+        set_cell_shading(cell, LIGHT_GRAY)
+        set_cell_text(cell, header, bold=True, size=7.5)
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+        set_cell_margins(cell, top=8, bottom=8, left=8, right=8)
 
-    # Oracle 19c swap requirement based on RAM
-    if ram_gb <= 2:
-        swap_req = "1.5x RAM"
-        swap_req_gb = ram_gb * 1.5
-    elif ram_gb <= 16:
-        swap_req = "Equal to RAM"
-        swap_req_gb = ram_gb
-    else:
-        swap_req = "16 GB"
-        swap_req_gb = 16.0
+    disk_rows = []
+    for disk in os_info.get("disk_info", []):
+        disk_rows.append(
+            {
+                "Filesystem": disk.get("filesystem", ""),
+                "Size": disk.get("size", ""),
+                "Used": disk.get("used", ""),
+                "Avail": disk.get("avail", ""),
+                "Use%": disk.get("use_pct", ""),
+                "Mounted\non": disk.get("mounted_on", ""),
+            }
+        )
 
-    tmp_avail_str = os_info.get("tmp_avail", "0")
-    try:
-        if "G" in tmp_avail_str.upper():
-            tmp_avail_gb = float(tmp_avail_str.upper().replace("G", "").strip())
-        elif "M" in tmp_avail_str.upper():
-            tmp_avail_gb = float(tmp_avail_str.upper().replace("M", "").strip()) / 1024
-        else:
-            tmp_avail_gb = float(tmp_avail_str)
-    except (ValueError, AttributeError):
-        tmp_avail_gb = 0.0
+    kernel_sem = os_info.get("kernel_params", {}).get("kernel.sem") or os_info.get("semaphores", "")
+    current_os_text = "\n".join(
+        [
+            item
+            for item in [
+                os_info.get("os_version", ""),
+                f"Linux version {os_info.get('kernel_version', '')}" if os_info.get("kernel_version") else "",
+                os_info.get("architecture", ""),
+            ]
+            if item
+        ]
+    )
 
-    arch = os_info.get("architecture", "")
-    arch_ok = "x86_64" in arch or "aarch64" in arch
-
-    req_rows = [
+    comparison_rows = [
         {
-            "Requirement": "RAM (minimum)",
-            "Oracle 19c Minimum": "1 GB",
-            "Actual": f"{ram_gb:.1f} GB",
-            "Status": "Pass" if ram_gb >= 1 else "Fail",
+            "requirement": "Linux OS:",
+            "minimum": "Red Hat Enterprise Linux 8: 4.18.0-80.el8.x86_64 or later",
+            "current": current_os_text,
         },
         {
-            "Requirement": "Swap Space",
-            "Oracle 19c Minimum": f"{swap_req} ({swap_req_gb:.1f} GB)",
-            "Actual": f"{swap_gb:.1f} GB",
-            "Status": "Pass" if swap_gb >= swap_req_gb else "Fail",
+            "requirement": "Linux Disk Space:",
+            "minimum": "/tmp At least 1 GB\n/u01 At least 7.2 GB",
+            "nested": {
+                "headers": ["Filesystem", "Size", "Used", "Avail", "Use%", "Mounted\non"],
+                "rows": disk_rows,
+                "widths": [
+                    Inches(0.78),
+                    Inches(0.42),
+                    Inches(0.42),
+                    Inches(0.42),
+                    Inches(0.42),
+                    Inches(1.05),
+                ],
+            },
         },
         {
-            "Requirement": "/tmp space",
-            "Oracle 19c Minimum": "1 GB",
-            "Actual": f"{tmp_avail_gb:.1f} GB available",
-            "Status": "Pass" if tmp_avail_gb >= 1 else "Fail",
+            "requirement": "Linux RAM:",
+            "minimum": "At least 1 GB",
+            "current": f"Memory size: {os_info.get('total_ram_mb', '')} MB",
         },
         {
-            "Requirement": "Architecture",
-            "Oracle 19c Minimum": "x86_64 / aarch64",
-            "Actual": arch,
-            "Status": "Pass" if arch_ok else "Fail",
+            "requirement": "Linux Tmp:",
+            "minimum": "/tmp At least 1 GB",
+            "current": f"Tmp size: {os_info.get('tmp_size', '')}",
+        },
+        {
+            "requirement": "Linux JDK & JRE:",
+            "minimum": "JDK 8 / JRE 8",
+            "current": os_info.get("jdk_version", ""),
+        },
+        {
+            "requirement": "Linux kernel\nsetting:",
+            "minimum": "250 32000 100 128",
+            "current": kernel_sem,
         },
     ]
 
-    def highlight_req(row, h, value):
-        return row.get("Status") == "Fail"
-
-    add_small_table(doc, ["Requirement", "Oracle 19c Minimum", "Actual", "Status"], req_rows,
-                    header_fill=HEADER_BLUE, highlight_rule=highlight_req)
+    for row in comparison_rows:
+        cells = compare_table.add_row().cells
+        set_cell_text(cells[0], row["requirement"], bold=True, size=7.5)
+        set_cell_text(cells[1], row["minimum"], size=7.5)
+        for cell in cells:
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            set_cell_margins(cell, top=5, bottom=5, left=5, right=5)
+        if row.get("nested"):
+            add_nested_table(
+                cells[2],
+                row["nested"]["headers"],
+                row["nested"]["rows"],
+                header_fill=LIGHT_GRAY,
+                font_size=5.6,
+                column_widths=row["nested"].get("widths"),
+            )
+        else:
+            set_cell_text(cells[2], row.get("current", ""), size=7.5)
 
     # ----- 2.3 User's environment -----
-    add_heading2(doc, "2.3 User's environment")
-    add_normal(doc, "Oracle user environment configuration:")
+    add_heading2(doc, _t(data, "2.3 User's environment"))
+    add_normal(doc, _t(data, "Oracle user environment configuration:"))
 
     env_rows = [
         {"Item": "Oracle Owner", "Value": os_info.get("oracle_owner", "")},
@@ -688,14 +1535,14 @@ def add_oracle_minimum_requirement(doc, data):
     # Kernel parameters sub-table
     kernel_params = os_info.get("kernel_params", {})
     if kernel_params:
-        add_heading2(doc, "2.3.1 Kernel Parameters")
+        add_heading2(doc, _t(data, "2.3.1 Kernel Parameters"))
         kp_rows = [{"Parameter": k, "Value": v} for k, v in kernel_params.items()]
         add_small_table(doc, ["Parameter", "Value"], kp_rows)
 
     # Disk space sub-table
     disk_info = os_info.get("disk_info", [])
     if disk_info:
-        add_heading2(doc, "2.3.2 Disk Space")
+        add_heading2(doc, _t(data, "2.3.2 Disk Space"))
         disk_rows = []
         for d in disk_info:
             disk_rows.append({
@@ -722,9 +1569,38 @@ def add_oracle_minimum_requirement(doc, data):
     # User limits sub-table
     user_limits = os_info.get("user_limits", {})
     if user_limits:
-        add_heading2(doc, "2.3.3 User Limits (ulimit)")
+        add_heading2(doc, _t(data, "2.3.3 User Limits (ulimit)"))
         ul_rows = [{"Limit": k, "Value": v} for k, v in user_limits.items()]
         add_small_table(doc, ["Limit", "Value"], ul_rows)
+
+    additional_nodes = []
+    primary_hostname = os_info.get("hostname", "")
+    for node in visible_nodes:
+        node_os = node.get("os_info", {})
+        if node_os.get("hostname") and node_os.get("hostname") != primary_hostname:
+            additional_nodes.append(node)
+
+    if additional_nodes:
+        add_heading2(doc, _t(data, "2.4 Additional server data from bundle ZIP"))
+        for node in additional_nodes:
+            node_os = node.get("os_info", {})
+            add_normal(doc, f"{_t(data, 'Source')}: {node.get('source', '')}")
+            add_small_table(
+                doc,
+                ["Item", "Detail"],
+                [
+                    {"Item": "Hostname", "Detail": node_os.get("hostname", "")},
+                    {"Item": "IP Address", "Detail": node_os.get("ip_address", "")},
+                    {"Item": "OS Version", "Detail": node_os.get("os_version", "")},
+                    {"Item": "Kernel Version", "Detail": node_os.get("kernel_version", "")},
+                    {"Item": "Total RAM (GB)", "Detail": node_os.get("total_ram_gb", "")},
+                    {"Item": "Oracle Home", "Detail": node_os.get("oracle_home", "")},
+                    {"Item": "Oracle SID", "Detail": node_os.get("oracle_sid", "")},
+                    {"Item": "JDK/JRE Version", "Detail": node_os.get("jdk_version", "")},
+                    {"Item": "/tmp Total Size", "Detail": node_os.get("tmp_size", "")},
+                    {"Item": "/tmp Available", "Detail": node_os.get("tmp_avail", "")},
+                ],
+            )
 
     doc.add_page_break()
 
@@ -736,11 +1612,11 @@ def add_oracle_minimum_requirement(doc, data):
 def add_system_checklist(doc, data):
     os_info = data.get("os_info", {})
 
-    add_heading1(doc, "3. System Checklist")
+    add_heading1(doc, _t(data, "3. System Checklist"))
 
     # ----- 3.1 Hardware configuration -----
-    add_heading2(doc, "3.1 Hardware configuration")
-    add_normal(doc, "Hardware and system configuration details:")
+    add_heading2(doc, _t(data, "3.1 Hardware configuration"))
+    add_normal(doc, _t(data, "Hardware and system configuration details:"))
 
     hw_rows = [
         {"Item": "Machine Name (Hostname)", "Detail": os_info.get("hostname", "")},
@@ -760,8 +1636,8 @@ def add_system_checklist(doc, data):
     add_small_table(doc, ["Item", "Detail"], hw_rows)
 
     # ----- 3.2 Network configuration -----
-    add_heading2(doc, "3.2 Network configuration")
-    add_normal(doc, "Network interface and hosts configuration:")
+    add_heading2(doc, _t(data, "3.2 Network configuration"))
+    add_normal(doc, _t(data, "Network interface and hosts configuration:"))
 
     net_rows = [
         {"Item": "IP Address", "Detail": os_info.get("ip_address", "")},
@@ -773,12 +1649,12 @@ def add_system_checklist(doc, data):
     # Hosts file
     hosts_entries = os_info.get("hosts_entries", [])
     if hosts_entries:
-        add_heading2(doc, "3.2.1 Hosts File (/etc/hosts)")
+        add_heading2(doc, _t(data, "3.2.1 Hosts File (/etc/hosts)"))
         hosts_rows = [{"IP Address": h.get("ip", ""), "Hostname(s)": h.get("hostnames", "")} for h in hosts_entries]
         add_small_table(doc, ["IP Address", "Hostname(s)"], hosts_rows)
 
     # ----- 3.3 Crontab information -----
-    add_heading2(doc, "3.3 Crontab information")
+    add_heading2(doc, _t(data, "3.3 Crontab information"))
 
     crontab_entries = os_info.get("crontab_entries", [])
     if crontab_entries:
@@ -797,7 +1673,35 @@ def add_system_checklist(doc, data):
 
         add_small_table(doc, ["Schedule", "Command", "Status"], cron_rows, highlight_rule=highlight_cron)
     else:
-        add_normal(doc, "No crontab entries found.")
+        add_normal(doc, _t(data, "No crontab entries found."))
+
+    bundle_nodes = data.get("bundle_nodes", [])
+    primary_hostname = os_info.get("hostname", "")
+    additional_nodes = [
+        node for node in bundle_nodes
+        if node.get("os_info", {}).get("hostname")
+        and node.get("os_info", {}).get("hostname") != primary_hostname
+    ]
+    if additional_nodes:
+        add_heading2(doc, _t(data, "3.4 Additional server checklist data from bundle ZIP"))
+        for node in additional_nodes:
+            node_os = node.get("os_info", {})
+            add_normal(doc, f"{_t(data, 'Source')}: {node.get('source', '')}")
+            add_small_table(
+                doc,
+                ["Item", "Detail"],
+                [
+                    {"Item": "Machine Name (Hostname)", "Detail": node_os.get("hostname", "")},
+                    {"Item": "Platform / OS", "Detail": node_os.get("os_version", "")},
+                    {"Item": "Kernel Version", "Detail": node_os.get("kernel_version", "")},
+                    {"Item": "CPU Type", "Detail": node_os.get("cpu_model", "")},
+                    {"Item": "Number of CPU(s)", "Detail": node_os.get("cpu_count", "")},
+                    {"Item": "Physical Memory (RAM)", "Detail": f"{node_os.get('total_ram_gb', '')} GB ({node_os.get('total_ram_mb', '')} MB)" if node_os.get("total_ram_gb") else ""},
+                    {"Item": "IP Address", "Detail": node_os.get("ip_address", "")},
+                    {"Item": "Subnet Mask", "Detail": node_os.get("subnet_mask", "")},
+                    {"Item": "Crontab entries", "Detail": str(len(node_os.get("crontab_entries", [])))},
+                ],
+            )
 
     doc.add_page_break()
 
@@ -807,9 +1711,9 @@ def add_system_checklist(doc, data):
 # =========================================================
 
 def add_database_information(doc, data):
-    add_heading1(doc, "4. Database Information")
+    add_heading1(doc, _t(data, "4. Database Information"))
 
-    add_heading2(doc, "4.1 Database Configuration.")
+    add_heading2(doc, _t(data, "4.1 Database Configuration."))
 
     db_name = data.get("instance_name") or data.get("db_parameters", {}).get("db_name", "")
     archive_enabled = "Yes" if data.get("archive_mode") == "ARCHIVELOG" else "No"
@@ -826,7 +1730,7 @@ def add_database_information(doc, data):
 
     add_small_table(doc, ["What?", "Values?"], rows)
 
-    add_heading2(doc, "4.2 Database Parameter")
+    add_heading2(doc, _t(data, "4.2 Database Parameter"))
 
     param_rows = []
     for k, v in data.get("db_parameters", {}).items():
@@ -837,20 +1741,20 @@ def add_database_information(doc, data):
 
     add_small_table(doc, ["Name", "Values"], param_rows, highlight_rule=highlight_param)
 
-    add_heading2(doc, "4.3 Major Security Initialization Parameters")
+    add_heading2(doc, _t(data, "4.3 Major Security Initialization Parameters"))
     sec_params = []
     for k in ["O7_DICTIONARY_ACCESSIBILITY", "audit_trail", "remote_login_passwordfile", "remote_os_authent"]:
         sec_params.append({"Name": k, "Values": data.get("db_parameters", {}).get(k, "")})
 
     add_small_table(doc, ["Name", "Values"], sec_params, highlight_rule=highlight_param)
 
-    add_normal(doc, "Additional Suggestion:", bold=True)
+    add_normal(doc, _t(data, "Additional Suggestion:"), bold=True)
     add_normal(
         doc,
         "- audit_trail parameter should be reviewed. If audit data is stored in database tablespace, monitor usage and purge data according to retention policy.",
     )
 
-    add_heading2(doc, "4.4 Database Files")
+    add_heading2(doc, _t(data, "4.4 Database Files"))
     df_rows = []
     for r in data.get("datafiles", []):
         df_rows.append({
@@ -883,7 +1787,7 @@ def add_database_information(doc, data):
             inc_val = [v for t, v in low_inc_files if t == tbs][0]
             add_normal(doc, f"- Refer database file table, the data file of {tbs} tablespace is auto extend by increase {inc_val} MB, it's frequently auto extend size of data file. We recommend you configure auto extend by increase to 50 MB for reduce time to amount of extend size of data file.")
 
-    add_heading2(doc, "4.5 Temporary Files")
+    add_heading2(doc, _t(data, "4.5 Temporary Files"))
     tmp_rows = []
     for r in data.get("tempfiles", []):
         tmp_rows.append({
@@ -896,7 +1800,7 @@ def add_database_information(doc, data):
         })
     add_small_table(doc, ["Tbs Name", "File Name", "Size(MB)", "Max(MB)", "Aut", "Inc.(MB)"], tmp_rows)
 
-    add_heading2(doc, "4.6 Redo Log File")
+    add_heading2(doc, _t(data, "4.6 Redo Log File"))
     redo_rows = []
     for r in data.get("redo_logs", []):
         redo_rows.append({
@@ -906,11 +1810,11 @@ def add_database_information(doc, data):
         })
     add_small_table(doc, ["Group#", "Member", "Size(MB)"], redo_rows)
 
-    add_heading2(doc, "4.7 Control File")
+    add_heading2(doc, _t(data, "4.7 Control File"))
     control_rows = [{"Control File Name#": r.get("file_name", "")} for r in data.get("control_files", [])]
     add_small_table(doc, ["Control File Name#"], control_rows)
 
-    add_heading2(doc, "4.8 Database Patch")
+    add_heading2(doc, _t(data, "4.8 Database Patch"))
     patch_rows = []
     for r in data.get("patch_info", []):
         patch_rows.append({
@@ -919,9 +1823,20 @@ def add_database_information(doc, data):
             "Recommended version": r.get("recommended_version", ""),
         })
 
-    add_small_table(doc, ["Component", "Current Version", "Recommended version"], patch_rows, header_fill=LIGHT_GRAY)
+    def highlight_patch(row, h, value):
+        current = str(row.get("Current Version", "")).strip()
+        recommended = str(row.get("Recommended version", "")).strip()
+        return bool(current and recommended and current != recommended)
 
-    add_normal(doc, "Additional suggestion:", bold=True)
+    add_small_table(
+        doc,
+        ["Component", "Current Version", "Recommended version"],
+        patch_rows,
+        header_fill=LIGHT_GRAY,
+        highlight_rule=highlight_patch,
+    )
+
+    add_normal(doc, _t(data, "Additional suggestion:"), bold=True)
     add_normal(doc, "- Recommend applying the latest patch to fix bugs and update database security.")
 
     doc.add_page_break()
@@ -977,225 +1892,122 @@ def create_growth_chart(growth_rows, output_dir):
 
 
 def add_performance_review(doc, data):
-    """Section 5.1 Performance Review table"""
     perf = data.get("perf_stats", {})
+    perf_review = data.get("perf_review", {})
     db_params = data.get("db_parameters", {})
     oracle_stats = data.get("oracle_stats", {})
 
-    add_heading2(doc, "5.1 Performance Review")
-    add_normal(doc, "Performance statistics from Oracle database instance:")
+    add_heading2(doc, _t(data, "5.1 Performance Review"))
 
-    def _fmt_pct(val):
-        """Format a ratio or percentage value nicely"""
-        try:
-            f = float(val)
-            if f < 1 and f > 0:
-                return f"{f * 100:.4f}%"
-            return f"{f:.4f}%" if f < 10 else f"{f:.2f}%"
-        except (ValueError, TypeError):
-            return str(val)
+    outer = doc.add_table(rows=1, cols=2)
+    outer.style = "Table Grid"
+    outer.alignment = WD_TABLE_ALIGNMENT.LEFT
+    outer.autofit = False
+    set_table_borders(outer)
+    set_table_column_widths(outer, [Inches(2.3), Inches(4.25)])
 
-    def _status_pct(val, good_above=90):
-        """Determine OK/Warning/Critical based on percentage threshold"""
-        try:
-            f = float(val)
-            pct = f * 100 if f < 1 else f
-            if pct >= good_above:
-                return "OK"
-            elif pct >= good_above - 10:
-                return "Warning"
-            else:
-                return "Critical"
-        except (ValueError, TypeError):
-            return ""
+    set_cell_shading(outer.rows[0].cells[0], LIGHT_GRAY)
+    set_cell_shading(outer.rows[0].cells[1], LIGHT_GRAY)
+    set_cell_text(outer.rows[0].cells[0], "Information Required to Tune\nMemory Allocation", bold=True, size=8)
+    set_cell_text(outer.rows[0].cells[1], "Answer", bold=True, size=8)
 
-    # Build the performance review rows
-    review_rows = []
+    def add_question_row(question_text, answer_text=None, answer_table=None):
+        row_cells = outer.add_row().cells
+        set_cell_text(row_cells[0], question_text, size=8)
+        if answer_table is not None:
+            add_nested_table(row_cells[1], answer_table["headers"], answer_table["rows"], header_fill=LIGHT_GRAY, font_size=7)
+        else:
+            set_cell_text(row_cells[1], answer_text or "", size=8)
+        return row_cells
 
-    # Library Cache Hit Ratio
-    lib_hit = perf.get("LIBRARY_CACHE_HITRATIO", "")
-    if lib_hit:
-        review_rows.append({
-            "Metric": "Library cache hit ratio",
-            "Value": _fmt_pct(lib_hit),
-            "Threshold": "> 90%",
-            "Status": _status_pct(lib_hit, 90),
-            "Remark": "Should be > 90%, else increase SHARED_POOL_SIZE",
-        })
+    library_rows = [
+        {"NameSpace": row.get("namespace", ""), "GetHitRatio": row.get("gethitratio", "")}
+        for row in perf_review.get("library_cache_namespace", [])
+    ]
+    add_question_row(
+        "1. What is the gethitratio of the\nlibrarycache?",
+        answer_table={
+            "headers": ["NameSpace", "GetHitRatio"],
+            "rows": library_rows or [{"NameSpace": "", "GetHitRatio": perf.get("LIBRARY_CACHE_HITRATIO", "")}],
+        },
+    )
 
-    # PIN / RELOAD ratio
-    pin_reload = perf.get("LIBRARY_CACHE_PIN_RELOAD", "")
-    if pin_reload:
-        review_rows.append({
-            "Metric": "PIN / RELOAD ratio",
-            "Value": _fmt_pct(pin_reload),
-            "Threshold": "> 99%",
-            "Status": _status_pct(pin_reload, 99),
-            "Remark": "",
-        })
+    pin_reload = perf_review.get("pin_reload", {})
+    add_question_row(
+        '2. What is the PIN / RELOAD ratio\nwithin the librarycache;\n\nSelect sum(pins) "Executions",\nsum(reloads) "Cache Misses",\nsum(reloads)/sum(pins) from\nv$librarycache;\n\nNote: Reload should ideally be\nZERO\nNever more than 1% of the PINS.',
+        answer_table={
+            "headers": ["Execution", "Cache Misses", "Sum"],
+            "rows": [
+                {
+                    "Execution": pin_reload.get("executions", ""),
+                    "Cache Misses": pin_reload.get("cache_misses", ""),
+                    "Sum": pin_reload.get("ratio", ""),
+                }
+            ],
+        },
+    )
 
-    # Dictionary cache miss ratio
-    dict_hit = perf.get("DICT_CACHE_HITRATIO", "")
-    if dict_hit:
-        review_rows.append({
-            "Metric": "Dictionary cache miss ratio",
-            "Value": _fmt_pct(dict_hit),
-            "Threshold": "> 85%",
-            "Status": _status_pct(dict_hit, 85),
-            "Remark": "Should be > 85%, else increase SHARED_POOL_SIZE",
-        })
+    def add_simple_pair(label, value):
+        row_cells = outer.add_row().cells
+        set_cell_text(row_cells[0], label, size=8)
+        set_cell_text(row_cells[1], value, size=8)
 
-    # Shared pool size
-    shared_pool = db_params.get("shared_pool_size", "")
-    review_rows.append({
-        "Metric": "Shared pool size",
-        "Value": shared_pool if shared_pool else "Auto (SGA_TARGET)",
-        "Threshold": "",
-        "Status": "OK",
-        "Remark": "",
-    })
+    add_simple_pair("If reloads to pin ratio is >1% -\nINCREASE the shared_pool_size.", "")
+    add_simple_pair("3. Data Dictionary Cache Miss\nRatio\nKeep this below 5%", f"Dictionary Cache Hit Ratio: {perf.get('DICT_CACHE_HITRATIO', '')}")
+    add_simple_pair("4. shared_pool_size =?", db_params.get("shared_pool_size", ""))
+    add_simple_pair("5. shared_pool_reserved_size =?", db_params.get("shared_pool_reserved_size", ""))
 
-    # Redo log space request
-    redo_req = perf.get("REDO_LOG_SPACE_REQUEST", "")
-    if redo_req:
-        try:
-            redo_val = int(float(redo_req))
-            redo_status = "OK" if redo_val < 100 else "Warning" if redo_val < 1000 else "Critical"
-        except ValueError:
-            redo_status = ""
-        review_rows.append({
-            "Metric": "Redo log space request",
-            "Value": redo_req,
-            "Threshold": "< 100",
-            "Status": redo_status,
-            "Remark": "High value may indicate redo log too small" if redo_status != "OK" else "",
-        })
+    shared_pool_stats = perf_review.get("shared_pool_stats", {})
+    shared_pool_lines = [
+        f"Free space: {shared_pool_stats.get('free_space', '')}",
+        f"Average Free Size: {shared_pool_stats.get('avg_free_size', '')}",
+        f"Max Free Size: {shared_pool_stats.get('max_free_size', '')}",
+        f"Used Space: {shared_pool_stats.get('used_space', '')}",
+        f"Average Used Space: {shared_pool_stats.get('avg_used_size', '')}",
+    ]
+    add_simple_pair(
+        "6. What are the\nSHARED_POOL_RESERVED\nstatistics?\nSelect * from\nv$shared_pool_reserved?",
+        "\n".join([line for line in shared_pool_lines if not line.endswith(": ")]),
+    )
+    add_simple_pair("7. Redo log space request", perf.get("REDO_LOG_SPACE_REQUEST", ""))
+    add_simple_pair("8. DB Block Buffer Cache Hit\nRatio?", perf.get("BUFFER_CACHE_HIT_RATIO", ""))
+    add_simple_pair("9. Latch Hit Ratio?", perf.get("LATCH_HIT_RATIO", ""))
+    add_simple_pair("10. Disk Sort Ratio?", perf.get("DISK_SORT_RATIO", ""))
+    add_simple_pair("11. Rollback Segment Waits?", perf.get("ROLLBACK_SEGMENT_WAITS", ""))
+    add_simple_pair("12. Dispatcher Workload?", perf.get("DISPATCHER_WORKLOAD", ""))
+    add_simple_pair("13. PGA cache hit percentage", perf.get("PGA_CACHE_HIT_PCT", oracle_stats.get("PGA_CACHE_HIT_PCT", "")))
+    add_simple_pair("The UNDO Tablespace", db_params.get("undo_tablespace", ""))
 
-    # DB block buffer cache hit ratio
-    buf_hit = perf.get("BUFFER_CACHE_HIT_RATIO", "")
-    if buf_hit:
-        review_rows.append({
-            "Metric": "DB block buffer cache hit ratio",
-            "Value": _fmt_pct(buf_hit),
-            "Threshold": "> 90%",
-            "Status": _status_pct(buf_hit, 90),
-            "Remark": "Should be > 90%, else increase DB_CACHE_SIZE",
-        })
+    undo_rows = [
+        {"Amount": row.get("amount", ""), "Segment Type": row.get("segment_type", ""), "Size(MB)": row.get("size_mb", "")}
+        for row in perf_review.get("undo_segments", [])
+    ]
+    add_question_row(
+        "Number and size of Undo\nSegments?",
+        answer_table={
+            "headers": ["Amount", "Segment Type", "Size(MB)"],
+            "rows": undo_rows or [{"Amount": "", "Segment Type": "", "Size(MB)": ""}],
+        },
+    )
 
-    # Latch hit ratio
-    latch_hit = perf.get("LATCH_HIT_RATIO", "")
-    if latch_hit:
-        review_rows.append({
-            "Metric": "Latch hit ratio",
-            "Value": _fmt_pct(latch_hit),
-            "Threshold": "> 99%",
-            "Status": _status_pct(latch_hit, 99),
-            "Remark": "",
-        })
+    add_simple_pair("Information Required to Tune\nLogging and Archiving", "")
+    add_simple_pair("At least 3 redo log groups?", "Yes" if len(data.get("redo_logs", [])) >= 3 else "No")
+    add_simple_pair("Are using Archive Mode", "Yes" if data.get("archive_mode", "") == "ARCHIVELOG" else "No")
 
-    # Disk sort ratio
-    disk_sort = perf.get("DISK_SORT_RATIO", "")
-    if disk_sort:
-        try:
-            ds_val = float(disk_sort)
-            ds_pct = ds_val if ds_val > 1 else ds_val * 100
-            ds_status = "OK" if ds_pct < 5 else "Warning"
-        except ValueError:
-            ds_status = ""
-        review_rows.append({
-            "Metric": "Disk sort ratio",
-            "Value": _fmt_pct(disk_sort),
-            "Threshold": "< 5%",
-            "Status": ds_status,
-            "Remark": "Should be < 5%, else increase SORT_AREA_SIZE" if ds_status != "OK" else "",
-        })
+    archive_format = str(db_params.get("log_archive_format", ""))
+    has_sequence_number = "%s" in archive_format.lower() or "%S" in archive_format
+    add_simple_pair("Archive log names include\nsequence number?", "Yes" if has_sequence_number else "No")
 
-    # Rollback segment waits
-    rb_waits = perf.get("ROLLBACK_SEGMENT_WAITS", "")
-    if rb_waits:
-        try:
-            rb_val = float(rb_waits)
-            rb_pct = rb_val if rb_val > 1 else rb_val * 100
-            rb_status = "OK" if rb_pct < 1 else "Warning"
-        except ValueError:
-            rb_status = ""
-        review_rows.append({
-            "Metric": "Rollback segment waits",
-            "Value": _fmt_pct(rb_waits),
-            "Threshold": "< 1%",
-            "Status": rb_status,
-            "Remark": "",
-        })
-
-    # Dispatcher workload
-    disp = perf.get("DISPATCHER_WORKLOAD", "")
-    if disp:
-        try:
-            disp_val = float(disp)
-            disp_pct = disp_val if disp_val > 1 else disp_val * 100
-            disp_status = "OK" if disp_pct < 50 else "Warning"
-        except ValueError:
-            disp_status = ""
-        review_rows.append({
-            "Metric": "Dispatcher workload",
-            "Value": _fmt_pct(disp),
-            "Threshold": "< 50%",
-            "Status": disp_status,
-            "Remark": "",
-        })
-
-    # PGA cache hit percentage
-    pga_hit = perf.get("PGA_CACHE_HIT_PCT", oracle_stats.get("PGA_CACHE_HIT_PCT", ""))
-    if pga_hit:
-        review_rows.append({
-            "Metric": "PGA cache hit percentage",
-            "Value": f"{pga_hit}%",
-            "Threshold": "> 70%",
-            "Status": _status_pct(pga_hit, 70),
-            "Remark": "",
-        })
-
-    # Undo tablespace
-    undo_tbs = db_params.get("undo_tablespace", "")
-    review_rows.append({
-        "Metric": "Undo tablespace",
-        "Value": undo_tbs,
-        "Threshold": "",
-        "Status": "OK" if undo_tbs else "",
-        "Remark": "",
-    })
-
-    # Archive mode
-    archive_mode = data.get("archive_mode", "")
-    review_rows.append({
-        "Metric": "Archive mode status",
-        "Value": archive_mode,
-        "Threshold": "",
-        "Status": "OK" if archive_mode == "ARCHIVELOG" else "Warning",
-        "Remark": "NOARCHIVELOG — data recovery limited" if archive_mode != "ARCHIVELOG" else "",
-    })
-
-    def highlight_perf(row, h, value):
-        return row.get("Status") in ("Critical", "Warning")
-
-    if review_rows:
-        add_small_table(doc, ["Metric", "Value", "Threshold", "Status", "Remark"],
-                        review_rows, header_fill=HEADER_BLUE, highlight_rule=highlight_perf)
-    else:
-        add_normal(doc, "No performance statistics found.")
-
-    # Additional Suggestion for archive mode
-    archive_mode = data.get("archive_mode", "")
-    if archive_mode != "ARCHIVELOG":
-        add_normal(doc, "Additional Suggestion:", bold=True)
+    if data.get("archive_mode", "") != "ARCHIVELOG":
+        add_normal(doc, _t(data, "Additional Suggestion:"), bold=True)
         add_normal(doc, "- An archived redo log file is a copy of one of the filled members of a redo log group. This database is in NOARCHIVELOG indicates you disable the archiving of the redo log. If a media failure occurs while the database is in NOARCHIVELOG mode, you can only restore the database to the point of the most recent full database backup. You cannot recover transactions subsequent to that backup.")
         add_normal(doc, "- We recommend you run a database in ARCHIVELOG mode indicates you enable the archiving of the redo log. A database backup, together with online and archived redo log files, guarantees that you can recover all committed transactions in the event of an operating system or disk failure. When your database is in archivelog mode, you have to have more disk space to store archive log file and it will decrease your database performance because Archiver Processes (ARCn) copy redo log files to a storage device.")
 
 
 def add_database_growth_rate(doc, data, output_dir):
-    add_heading1(doc, "5. RDBMS Performance")
+    add_heading1(doc, _t(data, "5. RDBMS Performance"))
     add_performance_review(doc, data)
-    add_heading2(doc, "5.2 Database Growth Rate")
+    add_heading2(doc, _t(data, "5.2 Database Growth Rate"))
 
     growth_rows = data.get("growth_rows_raw", [])
     db_name = data.get("instance_name") or data.get("db_parameters", {}).get("db_name", "")
@@ -1291,6 +2103,16 @@ def _fmt_number(value, decimals=0):
     if decimals:
         return f"{number:,.{decimals}f}"
     return f"{number:,.0f}"
+
+
+def _fmt_plain_number(value, decimals=0):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if decimals:
+        return f"{number:.{decimals}f}".rstrip("0").rstrip(".")
+    return f"{number:.0f}"
 
 
 def _current_index(rows):
@@ -1644,7 +2466,7 @@ def create_os_perf_charts(os_perf_data, output_dir):
 def add_performance_analysis(doc, data, output_dir):
     sec53 = data.get("section53", {})
     
-    add_heading2(doc, "5.3 Performance Analysis")
+    add_heading2(doc, _t(data, "5.3 Performance Analysis"))
     
     # ----- 5.3.1 CPU Section -----
     add_heading3(doc, "5.3.1 CPU Section")
@@ -1852,38 +2674,64 @@ def add_performance_analysis(doc, data, output_dir):
 # =========================================================
 
 def add_tablespace_free_space(doc, data):
-    add_heading1(doc, "6. Tablespace Free Space")
-    add_heading2(doc, "6.1 Tablespace Free Space")
+    add_heading1(doc, _t(data, "6. Tablespace Free Space"))
+    add_heading2(doc, _t(data, "6.1 Tablespace Free Space"))
 
     rows = []
-    for name, info in data.get("tablespace_free", {}).items():
-        try:
-            pct_free = float(info.get("pct_free", 0))
-        except Exception:
-            pct_free = 0
+    for entry in _build_tablespace_capacity_rows(data):
+        rows.append(
+            {
+                "TABLESPACE_NAME": entry["name"],
+                "Allocated (MB)": _fmt_plain_number(entry["allocated_mb"]),
+                "Used (MB)": _fmt_plain_number(entry["used_mb"], 2),
+                "Max (MB)": _fmt_plain_number(entry["max_mb"], 2),
+                "Percentage of Free space (%)": _fmt_plain_number(entry["free_pct_of_max"], 2),
+                "Free of Max (MB)": _fmt_plain_number(entry["free_of_max_mb"], 2),
+                "_status": entry["status"],
+            }
+        )
 
-        rows.append({
-            "TABLESPACE_NAME": name,
-            "Percentage of Free space (%)": pct_free,
-            "Status": "Critical" if pct_free < 10 else "Warning" if pct_free < 20 else "OK",
-        })
+    headers = [
+        "TABLESPACE_NAME",
+        "Allocated\n(MB)",
+        "Used (MB)",
+        "Max (MB)",
+        "Percentage\nof Free\nspace (%)",
+        "Free of Max\n(MB)",
+    ]
+    value_keys = [
+        "TABLESPACE_NAME",
+        "Allocated (MB)",
+        "Used (MB)",
+        "Max (MB)",
+        "Percentage of Free space (%)",
+        "Free of Max (MB)",
+    ]
 
-    rows.sort(key=lambda x: x["Percentage of Free space (%)"])
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.style = "Table Grid"
+    set_table_borders(table)
 
-    def highlight_tbs(row, h, value):
-        return row.get("Status") in ["Critical", "Warning"]
+    for index, header in enumerate(headers):
+        cell = table.rows[0].cells[index]
+        set_cell_shading(cell, HEADER_BLUE)
+        set_cell_text(cell, header, bold=True, color=WHITE, size=8, align="center")
 
-    add_small_table(doc, ["TABLESPACE_NAME", "Percentage of Free space (%)", "Status"], rows, header_fill=HEADER_BLUE, highlight_rule=highlight_tbs)
-
-    add_normal(doc, "Additional Suggestion:", bold=True)
-    add_normal(doc, "- Refer tablespace free space. Tablespaces with low free space should be monitored. If datafile auto extend is enabled, risk may be reduced.")
+    for row in rows:
+        cells = table.add_row().cells
+        row_fill = YELLOW if row.get("_status") == "Critical" else WHITE
+        for index, key in enumerate(value_keys):
+            set_cell_shading(cells[index], row_fill)
+            align = "left" if index == 0 else "right"
+            set_cell_text(cells[index], row.get(key, ""), size=8, align=align)
 
     doc.add_page_break()
 
 
 def add_default_tablespace(doc, data):
-    add_heading1(doc, "7. Default tablespace and temporary tablespace")
-    add_heading2(doc, "7.1 Default tablespace and temporary tablespace")
+    add_heading1(doc, _t(data, "7. Default tablespace and temporary tablespace"))
+    add_heading2(doc, _t(data, "7.1 Default tablespace and temporary tablespace"))
 
     rows = []
     for r in data.get("user_tablespaces", []):
@@ -1899,8 +2747,8 @@ def add_default_tablespace(doc, data):
 
 
 def add_database_registry(doc, data):
-    add_heading1(doc, "8. Database Registry")
-    add_heading2(doc, "8.1 Check Database Registry")
+    add_heading1(doc, _t(data, "8. Database Registry"))
+    add_heading2(doc, _t(data, "8.1 Check Database Registry"))
 
     rows = []
     for r in data.get("registry_list", []):
@@ -1917,8 +2765,8 @@ def add_database_registry(doc, data):
 
 
 def add_appendix_invalid_objects(doc, data):
-    add_heading1(doc, "APPENDIX A – Invalid Object")
-    add_heading2(doc, "A.a Invalid Objects report.")
+    add_heading1(doc, _t(data, "APPENDIX A – Invalid Object"))
+    add_heading2(doc, _t(data, "A.a Invalid Objects report."))
 
     rows = []
     for r in data.get("invalid_objects_list", []):
@@ -1934,29 +2782,29 @@ def add_appendix_invalid_objects(doc, data):
     if len(rows) > 350:
         add_normal(doc, f"Showing first 350 of {len(rows)} invalid objects.")
 
-    add_heading2(doc, "A.b Disabled Constraints.")
+    add_heading2(doc, _t(data, "A.b Disabled Constraints."))
     add_normal(doc, "No disabled constraints data found.")
 
-    add_normal(doc, "Additional Suggestion:", bold=True)
+    add_normal(doc, _t(data, "Additional Suggestion:"), bold=True)
     add_normal(doc, "- You should verify invalid objects and disabled constraints that are used by application or not.")
 
     doc.add_page_break()
 
 
 def add_appendix_defaults(doc, data, output_dir):
-    add_heading1(doc, "APPENDIX B – Information from alert log")
+    add_heading1(doc, _t(data, "APPENDIX B – Information from alert log"))
     add_normal(doc, "- There is no alert Log to concern in this quarter.")
     doc.add_page_break()
 
-    add_heading1(doc, "APPENDIX C – SQL Statement should be to investigate")
+    add_heading1(doc, _t(data, "APPENDIX C – SQL Statement should be to investigate"))
     add_normal(doc, "- There is no SQL statement to concern in this quarter.")
     doc.add_page_break()
 
-    add_heading1(doc, "APPENDIX D – Operating system log")
+    add_heading1(doc, _t(data, "APPENDIX D – Operating system log"))
     add_normal(doc, "- There is no Operating System log to concern in this quarter.")
     doc.add_page_break()
 
-    add_heading1(doc, "APPENDIX E – Backup Configuration")
+    add_heading1(doc, _t(data, "APPENDIX E – Backup Configuration"))
     backup_info = data.get("backup_info", {})
     if backup_info.get("found"):
         title = backup_info.get("title", "")
@@ -1968,7 +2816,7 @@ def add_appendix_defaults(doc, data, output_dir):
         add_normal(doc, "No backup configuration data found.")
     doc.add_page_break()
 
-    add_heading1(doc, "APPENDIX F – OS Performance Summary")
+    add_heading1(doc, _t(data, "APPENDIX F – OS Performance Summary"))
     
     os_info = data.get("os_info", {})
     os_perf = data.get("os_perf", {})
@@ -1999,7 +2847,7 @@ def add_appendix_defaults(doc, data, output_dir):
         chart_paths = os_perf.get("chart_paths", {})
         
         if chart_paths.get("cpu_all") or cpu_path:
-            add_heading2(doc, "F.1 CPU Performance")
+            add_heading2(doc, _t(data, "F.1 CPU Performance"))
             
             runq_samples = os_perf.get("runq_samples", [])
             runq_trend = os_perf.get("runq_trend", [])
@@ -2075,7 +2923,7 @@ def add_appendix_defaults(doc, data, output_dir):
             ])
             
         if chart_paths.get("mem_free") or mem_path:
-            add_heading2(doc, "F.2 Memory Performance")
+            add_heading2(doc, _t(data, "F.2 Memory Performance"))
             add_heading3(doc, "Physical Memory")
             if chart_paths.get("mem_free"):
                 p = doc.add_paragraph()
@@ -2143,7 +2991,7 @@ def add_appendix_defaults(doc, data, output_dir):
             ])
             
         if chart_paths.get("cpu_wait_io") or chart_paths.get("disk_service") or disk_path:
-            add_heading2(doc, "F.3 Disk Performance")
+            add_heading2(doc, _t(data, "F.3 Disk Performance"))
             add_heading3(doc, "CPU Wait I/O")
             if chart_paths.get("cpu_wait_io"):
                 p = doc.add_paragraph()
@@ -2193,9 +3041,13 @@ def create_docx_report(data: dict, output_docx: Path, source_zip: Path, output_d
 
     doc = Document()
     set_doc_layout(doc)
+    set_update_fields_on_open(doc)
+    add_report_header(doc, data)
+    add_report_footer(doc, data)
 
-    add_table_of_contents(doc)
-    add_defect_classification(doc)
+    add_cover_page(doc, data, source_zip, output_dir)
+    add_table_of_contents(doc, data)
+    add_defect_classification(doc, data)
     add_suggestion_summary(doc, data)
     add_general_project_information(doc, data, source_zip)
     add_oracle_minimum_requirement(doc, data)

@@ -20,7 +20,10 @@ class ReportMetadata:
     quarter: str = ""
     sale: str = ""
     report_type: str = "Preventive Maintenance"
+    language: str = "English"
+    report_date: str = ""
     customers: list[dict] = field(default_factory=list)
+    sales: list[dict] = field(default_factory=list)
     engineers: list[dict] = field(default_factory=list)
     change_records: list[dict] = field(default_factory=list)
     reviewers: list[dict] = field(default_factory=list)
@@ -35,7 +38,10 @@ class ReportMetadata:
             "quarter": self.quarter,
             "sale": self.sale,
             "report_type": self.report_type,
+            "language": self.language,
+            "report_date": self.report_date,
             "customers": self.customers,
+            "sales": self.sales,
             "engineers": self.engineers,
             "change_records": self.change_records,
             "reviewers": self.reviewers,
@@ -45,8 +51,9 @@ class ReportMetadata:
 @dataclass(frozen=True)
 class ExportRequest:
     zip_path: Path
-    output_dir: Path
+    output_dir: Path | None
     metadata: ReportMetadata = field(default_factory=ReportMetadata)
+    create_pdf: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,7 +73,7 @@ def validate_export_request(request: ExportRequest) -> list[str]:
     elif request.zip_path.suffix.lower() != ".zip":
         errors.append("Input file must be a .zip file.")
 
-    if not request.output_dir:
+    if request.output_dir is None:
         errors.append("Select an output folder.")
     elif request.output_dir.exists() and not request.output_dir.is_dir():
         errors.append(f"Output path is not a folder: {request.output_dir}")
@@ -84,6 +91,7 @@ def export_report(request: ExportRequest, progress: ProgressCallback | None = No
             progress(message)
 
     emit("Validating input")
+    assert request.output_dir is not None
     request.output_dir.mkdir(parents=True, exist_ok=True)
 
     emit("Extracting ZIP and parsing Fast Assessment data")
@@ -91,8 +99,8 @@ def export_report(request: ExportRequest, progress: ProgressCallback | None = No
         request.zip_path,
         request.output_dir,
         metadata=request.metadata.to_dict(),
+        create_pdf=request.create_pdf,
     )
 
     emit("Report export completed")
     return ExportResult(docx_path=docx_path, pdf_path=pdf_path, json_path=json_path)
-

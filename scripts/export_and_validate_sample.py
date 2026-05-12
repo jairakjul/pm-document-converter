@@ -19,6 +19,7 @@ def remove_previous_sample_outputs() -> None:
         f"{BASE_NAME}_PM_Report.docx",
         f"{BASE_NAME}_PM_Report.pdf",
         f"{BASE_NAME}_parsed_data.json",
+        "cover_banner.png",
         "database_growth_rate.png",
         "database_pga_advisory.png",
         "database_sga_advisory.png",
@@ -57,8 +58,12 @@ def export_sample() -> None:
         metadata=ReportMetadata(
             project_name="Sample Validation Export",
             db_name="icompdb",
+            customer_full="Samsung Life Insurance",
+            customer_abbrev="SLI",
             quarter="Q2 2025",
             report_type="Preventive Maintenance",
+            report_date="12-Jan-2026",
+            change_records=[{"date": "12-Jan-2026", "author": "", "version": "1.0", "ref": "Initial Document"}],
         ),
     )
 
